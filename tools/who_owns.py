@@ -27,7 +27,7 @@ def load_rules():
 
 def resolve(path, rules):
     """最长前缀优先。"""
-    normalized = str(path).replace("\\", "/").lstrip("./")
+    normalized = str(path).replace("\\", "/").removeprefix("./")
     best = None
     for prefix, owner in rules:
         if normalized.startswith(prefix) and (best is None or len(prefix) > len(best[0])):
