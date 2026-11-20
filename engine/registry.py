@@ -7,6 +7,7 @@
 """
 
 from dataclasses import dataclass
+from pathlib import Path
 
 from . import schema as schema_mod
 from . import stdtypes
@@ -40,9 +41,17 @@ class Registry:
         self.models = {}  # 类型标识 -> 必须继承的抽象基类
 
     # -- 加载 ------------------------------------------------------------
-    def load(self, plugins_dir):
+    def load(self, *plugins_dirs):
         self._register_std()
-        zip_paths = find_zips(plugins_dir)
+        zip_paths = []
+        seen = set()
+        for plugins_dir in plugins_dirs:
+            for zip_path in find_zips(plugins_dir):
+                absolute = str(Path(zip_path).resolve())
+                if absolute in seen:
+                    continue
+                seen.add(absolute)
+                zip_paths.append(zip_path)
         add_all_to_sys_path(zip_paths)
         infos = []
         for zip_path in zip_paths:

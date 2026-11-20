@@ -16,6 +16,17 @@
 - Tester 只写测试，不改产品代码；测出 bug 报给该文件负责人。
 - 跨目录的需求先找 Chief。
 
+### 1.1 引擎边界
+
+引擎（`engine/`）必须能在脱离仓库其余部分的条件下独立运行：
+
+- **不依赖任何具体插件**。一个插件都没有，或者只有第三方插件、官方插件全删光，引擎照样能加载、校验、执行工作流。
+- **不认识 studio 和 frontend**。`engine/` 下的源码不出现、不 import 这两个目录的任何东西，也不为 studio 加任何兼容分支。依赖方向只有一个：studio → engine。
+- **插件目录可缺省**。全局目录是引擎包同级的 `plugins/`（与当前工作目录无关），缺失只警告不中断；`-p/--plugins-dir` 可重复，追加扫描任意多个目录。
+- **标准类型属于引擎**。`std_1.0@*` 五个类型和 `PredictorModel` 契约定义在 `engine/stdtypes.py`，不由任何插件提供。
+
+`tests/test_standalone.py` 固化了前两条，破坏它就会红。
+
 ---
 
 ## 2. 插件契约
@@ -219,10 +230,13 @@ base: '/static/'      // 构建时生效，dev 用 '/'
 |---|---|
 | 打包插件 | `python tools/build_plugins.py` |
 | 命令行引擎 | `python -m engine run <json>` / `validate` / `plugins` |
+| 指定插件目录 | `python -m engine run --plugins-dir <dir> --plugins-dir <dir> <json>` |
 | 起 Web 服务 | `python -m studio --port 8765` |
 | 构建前端 | `python tools/build_web.py` |
 | 冒烟 | `python tests/smoke.py` |
 | 全量测试 | `python tests/run_all.py` |
+
+`-p/--plugins-dir` 可重复，写在子命令前后都有效。实际扫描 = 引擎包同级的 `plugins/` + 所有指定目录，每个目录只扫一层 `*.zip`，不递归；不同目录出现同名插件直接报错，不静默覆盖。
 
 解释器统一用 `C:\Users\zh\.conda\envs\flow\python.exe`。
 

@@ -1,6 +1,6 @@
 """本地 Web API：给 Vue 前端提供插件查询、校验和执行接口。
 
-    python -m studio [--plugins plugins] [--port 8765] [--host 127.0.0.1]
+    python -m studio [--plugins-dir DIR ...] [--port 8765] [--host 127.0.0.1]
 
 分层：:class:`EngineService` 只做业务（registry -> 契约载荷），
 :class:`StudioHandler` 只做 HTTP 路由/序列化/静态文件。
@@ -26,6 +26,7 @@ from urllib.parse import unquote, urlsplit
 
 from engine import __version__ as ENGINE_VERSION
 from engine.errors import WorkflowError
+from engine.loader import DEFAULT_DIR
 from engine.preview import preview
 from engine.registry import Registry
 from engine.runner import run
@@ -346,13 +347,20 @@ def main(argv=None):
     parser = argparse.ArgumentParser(
         prog="studio", description=f"数据分析工作流本地 Web API v{__version__}"
     )
-    parser.add_argument("-p", "--plugins", default="plugins", help="插件 zip 目录（默认 ./plugins）")
+    parser.add_argument(
+        "-p",
+        "--plugins-dir",
+        action="append",
+        default=None,
+        help="额外插件 zip 目录，可重复指定（默认总会扫描引擎自带的 plugins/）",
+    )
     parser.add_argument("--host", default="127.0.0.1", help="监听地址（默认 127.0.0.1）")
     parser.add_argument("--port", type=int, default=8765, help="监听端口（默认 8765）")
     args = parser.parse_args(argv)
 
+    dirs = [DEFAULT_DIR] + (args.plugins_dir or [])
     try:
-        registry = Registry().load(args.plugins)
+        registry = Registry().load(*dirs)
     except WorkflowError as exc:
         print(f"[插件加载失败] {exc}", file=sys.stderr)
         return 1

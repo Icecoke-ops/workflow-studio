@@ -26,6 +26,8 @@ from .typeid import is_name, is_version
 
 _REQ_SPLIT = re.compile(r"[<>=!~\[; ]")
 
+DEFAULT_DIR = Path(__file__).resolve().parent.parent / "plugins"
+
 # importlib.metadata 每次查询都会扫一遍 sys.path（包括所有插件 zip），
 # 按发行名缓存一下，N 个插件 × M 个依赖不要重复扫。
 #
@@ -61,7 +63,8 @@ class PluginInfo:
 def find_zips(plugins_dir):
     path = Path(plugins_dir)
     if not path.is_dir():
-        raise PluginLoadError(f"插件目录不存在：{path.resolve()}")
+        print(f"[警告] 插件目录不存在，已跳过：{path.resolve()}", file=sys.stderr)
+        return []
     return sorted(path.glob("*.zip"))
 
 

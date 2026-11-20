@@ -5,6 +5,7 @@ import sys
 
 from . import __version__
 from .errors import WorkflowError
+from .loader import DEFAULT_DIR
 from .preview import preview
 from .registry import Registry
 from .runner import run
@@ -84,6 +85,17 @@ def _force_utf8(stream):
             pass
 
 
+def _add_plugins_dir(parser, default):
+    parser.add_argument(
+        "-p",
+        "--plugins-dir",
+        action="append",
+        default=default,
+        metavar="DIR",
+        help="插件 zip 目录，可重复指定；默认扫描工程 plugins/",
+    )
+
+
 def main(argv=None):
     _force_utf8(sys.stdout)
     _force_utf8(sys.stderr)
@@ -91,18 +103,21 @@ def main(argv=None):
         prog="engine",
         description=f"数据分析工作流执行引擎 v{__version__}",
     )
-    parser.add_argument("-p", "--plugins", default="plugins", help="插件 zip 目录（默认 ./plugins）")
+    _add_plugins_dir(parser, [])
     sub = parser.add_subparsers(dest="command", required=True)
-    sub.add_parser("plugins", help="列出已加载的插件、组件和类型")
+    plugins_parser = sub.add_parser("plugins", help="列出已加载的插件、组件和类型")
+    _add_plugins_dir(plugins_parser, argparse.SUPPRESS)
     validate_parser = sub.add_parser("validate", help="只校验工作流，不执行")
     validate_parser.add_argument("file", help="工作流 JSON 文件")
+    _add_plugins_dir(validate_parser, argparse.SUPPRESS)
     run_parser = sub.add_parser("run", help="校验并执行工作流")
     run_parser.add_argument("file", help="工作流 JSON 文件")
+    _add_plugins_dir(run_parser, argparse.SUPPRESS)
 
     args = parser.parse_args(argv)
 
     try:
-        registry = Registry().load(args.plugins)
+        registry = Registry().load(DEFAULT_DIR, *args.plugins_dir)
     except WorkflowError as exc:
         print(f"[插件加载失败] {exc}", file=sys.stderr)
         return 1

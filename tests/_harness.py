@@ -1,9 +1,11 @@
-"""测试公共设施：断言、异常匹配、用例循环。
+"""测试公共设施：断言、异常匹配、用例循环，以及临时插件 zip 夹具。
 
 每个 test_*.py 只保留自己的用例，跑测循环统一走这里。
 """
 
 import traceback
+import zipfile
+from pathlib import Path
 
 
 def check(condition, message):
@@ -45,3 +47,99 @@ def run_cases(label, cases):
         return 1
     print(f"\nOK  {label}：{len(cases)} 个用例全部通过")
     return 0
+
+
+def write_zip(directory, filename, entries):
+    path = Path(directory) / filename
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as archive:
+        for name, content in entries.items():
+            archive.writestr(name, content)
+    return path
+
+
+def component_source(
+    class_name,
+    input_schema="{}",
+    output_schema="{}",
+    attrs="",
+    component_name=None,
+    config_body="return {}",
+    invoke_body="return {}",
+    with_invoke=True,
+):
+    lines = [
+        f"class {class_name}(Component):",
+        f'    name = "{component_name or class_name}"',
+    ]
+    if attrs:
+        lines.extend(attrs.rstrip("\n").splitlines())
+    lines.extend(
+        [
+            "",
+            "    @staticmethod",
+            "    def config_schema():",
+            f"        {config_body}",
+            "",
+            "    @staticmethod",
+            "    def input_schema():",
+            f"        return {input_schema}",
+            "",
+            "    @staticmethod",
+            "    def output_schema():",
+            f"        return {output_schema}",
+            "",
+            "    def __init__(self, config):",
+            "        pass",
+        ]
+    )
+    if with_invoke:
+        lines.extend(["", "    def invoke(self):", f"        {invoke_body}"])
+    return "\n".join(lines)
+
+
+def plugin_source(
+    name,
+    *,
+    version="1.0",
+    title="测试插件",
+    types=None,
+    class_name="Thing",
+    input_schema="{}",
+    output_schema="{}",
+    extra="",
+    attrs="",
+    component=None,
+    components=None,
+    config_body="return {}",
+    invoke_body="return {}",
+    with_invoke=True,
+):
+    """十几段临时插件源码只差元数据和端口 schema，收成一个模板，改加载器契约只改一处。"""
+    if component is None:
+        component = component_source(
+            class_name,
+            input_schema,
+            output_schema,
+            attrs,
+            config_body=config_body,
+            invoke_body=invoke_body,
+            with_invoke=with_invoke,
+        )
+    if components is None:
+        components = f"COMPONENTS = [{class_name}]"
+    lines = []
+    if extra:
+        lines.extend(extra.rstrip("\n").splitlines())
+    lines.extend(
+        [
+            "from engine.api import Component",
+            "",
+            f'PLUGIN_NAME = "{name}"',
+            f'PLUGIN_VERSION = "{version}"',
+            f'PLUGIN_TITLE = "{title}"',
+        ]
+    )
+    if types:
+        lines.append(f"PLUGIN_TYPES = {types}")
+    lines.extend(["", component.rstrip("\n"), "", components])
+    return "\n".join(lines) + "\n"

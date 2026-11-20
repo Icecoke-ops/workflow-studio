@@ -7,7 +7,6 @@
 
 import sys
 import tempfile
-import zipfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -20,100 +19,14 @@ from engine.loader import find_zips, load_plugin
 from engine.registry import Registry
 from engine.workflow import validate
 
-from _harness import check, expect_raises, run_cases
-
-
-def write_zip(directory, filename, entries):
-    path = Path(directory) / filename
-    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as archive:
-        for name, content in entries.items():
-            archive.writestr(name, content)
-    return path
-
-
-def _component_source(
-    class_name,
-    input_schema="{}",
-    output_schema="{}",
-    attrs="",
-    component_name=None,
-    config_body="return {}",
-    with_invoke=True,
-):
-    lines = [
-        f"class {class_name}(Component):",
-        f'    name = "{component_name or class_name}"',
-    ]
-    if attrs:
-        lines.extend(attrs.rstrip("\n").splitlines())
-    lines.extend(
-        [
-            "",
-            "    @staticmethod",
-            "    def config_schema():",
-            f"        {config_body}",
-            "",
-            "    @staticmethod",
-            "    def input_schema():",
-            f"        return {input_schema}",
-            "",
-            "    @staticmethod",
-            "    def output_schema():",
-            f"        return {output_schema}",
-            "",
-            "    def __init__(self, config):",
-            "        pass",
-        ]
-    )
-    if with_invoke:
-        lines.extend(["", "    def invoke(self):", "        return {}"])
-    return "\n".join(lines)
-
-
-def plugin_source(
-    name,
-    *,
-    version="1.0",
-    title="测试插件",
-    types=None,
-    class_name="Thing",
-    input_schema="{}",
-    output_schema="{}",
-    extra="",
-    attrs="",
-    component=None,
-    components=None,
-    config_body="return {}",
-    with_invoke=True,
-):
-    """十几段临时插件源码只差元数据和端口 schema，收成一个模板，改加载器契约只改一处。"""
-    if component is None:
-        component = _component_source(
-            class_name,
-            input_schema,
-            output_schema,
-            attrs,
-            config_body=config_body,
-            with_invoke=with_invoke,
-        )
-    if components is None:
-        components = f"COMPONENTS = [{class_name}]"
-    lines = []
-    if extra:
-        lines.extend(extra.rstrip("\n").splitlines())
-    lines.extend(
-        [
-            "from engine.api import Component",
-            "",
-            f'PLUGIN_NAME = "{name}"',
-            f'PLUGIN_VERSION = "{version}"',
-            f'PLUGIN_TITLE = "{title}"',
-        ]
-    )
-    if types:
-        lines.append(f"PLUGIN_TYPES = {types}")
-    lines.extend(["", component.rstrip("\n"), "", components])
-    return "\n".join(lines) + "\n"
+from _harness import (
+    check,
+    component_source,
+    expect_raises,
+    plugin_source,
+    run_cases,
+    write_zip,
+)
 
 
 def plugin_files(package, name=None, version="1.0"):
@@ -267,7 +180,7 @@ def case_duplicate_component_name():
     with tempfile.TemporaryDirectory(prefix="engine_loader_test_") as tmp:
         source = plugin_source(
             "ldp11",
-            component=_component_source("A", component_name="Same")
+            component=component_source("A", component_name="Same")
             + '\n\n\nclass B(A):\n    name = "Same"',
             components="COMPONENTS = [A, B]",
         )
@@ -291,6 +204,58 @@ def case_duplicate_plugin_name():
         registry.load(first_dir)
         expect_raises(
             PluginLoadError, lambda: registry.load(second_dir), "插件名重复"
+        )
+
+
+def case_multiple_plugins_dirs():
+    """两个目录各一个插件，一次 load 都进来。"""
+    with tempfile.TemporaryDirectory(prefix="engine_loader_test_") as tmp:
+        root = Path(tmp)
+        dir_a = root / "a"
+        dir_b = root / "b"
+        dir_a.mkdir()
+        dir_b.mkdir()
+        write_zip(dir_a, "ldp30.zip", plugin_files("ldp30"))
+        write_zip(dir_b, "ldp31.zip", plugin_files("ldp31"))
+        registry = Registry().load(dir_a, dir_b)
+        check(
+            registry.get_component("ldp30", "Thing") is not None,
+            "第一个目录的插件没加载",
+        )
+        check(
+            registry.get_component("ldp31", "Thing") is not None,
+            "第二个目录的插件没加载",
+        )
+        check(
+            sorted(registry.plugins) == ["ldp30", "ldp31", "std"],
+            f"插件集合不对：{sorted(registry.plugins)}",
+        )
+
+
+def case_same_dir_twice():
+    """同一目录传两次：按绝对路径去重，插件只加载一次，不报重复。"""
+    with tempfile.TemporaryDirectory(prefix="engine_loader_test_") as tmp:
+        write_zip(tmp, "ldp32.zip", plugin_files("ldp32"))
+        registry = Registry().load(tmp, tmp)
+        check(registry.get_component("ldp32", "Thing") is not None, "插件应加载")
+        check(
+            sorted(registry.plugins) == ["ldp32", "std"],
+            f"插件应只出现一次：{sorted(registry.plugins)}",
+        )
+
+
+def case_duplicate_plugin_across_dirs():
+    """不同目录里的同名插件一次 load 仍要报重复。"""
+    with tempfile.TemporaryDirectory(prefix="engine_loader_test_") as tmp:
+        root = Path(tmp)
+        dir_a = root / "a"
+        dir_b = root / "b"
+        dir_a.mkdir()
+        dir_b.mkdir()
+        write_zip(dir_a, "ldp33.zip", plugin_files("ldp33"))
+        write_zip(dir_b, "ldp33.zip", plugin_files("ldp33"))
+        expect_raises(
+            PluginLoadError, lambda: Registry().load(dir_a, dir_b), "插件名重复"
         )
 
 
@@ -814,6 +779,9 @@ CASES = [
     ("组件不继承 Component 报错", case_component_not_subclass),
     ("组件重名报错", case_duplicate_component_name),
     ("重复插件名报错", case_duplicate_plugin_name),
+    ("多目录：两个目录各一个插件都加载", case_multiple_plugins_dirs),
+    ("多目录：同一目录传两次去重", case_same_dir_twice),
+    ("多目录：不同目录同名插件报重复", case_duplicate_plugin_across_dirs),
     ("依赖缺失报错含包名和 pip 提示", case_missing_requirement),
     ("依赖已安装时正常加载", case_installed_requirement_ok),
     ("PLUGIN_TYPES 类型名非法报错", case_bad_declared_type_name),

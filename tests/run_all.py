@@ -21,6 +21,7 @@ ORDER = [
     "test_cli.py",
     "test_preview.py",
     "test_contract.py",
+    "test_standalone.py",
 ]
 
 

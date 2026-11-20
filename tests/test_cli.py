@@ -16,7 +16,7 @@ if str(ROOT) not in sys.path:
 
 from engine.cli import _force_utf8, main as cli_main
 
-from _harness import check, run_cases
+from _harness import check, plugin_source, run_cases, write_zip
 
 PLUGINS = str(ROOT / "plugins")
 DEMO = str(ROOT / "workflows" / "linreg_demo.json")
@@ -110,10 +110,41 @@ def case_invalid_json_file():
     check("[读取失败]" in err, f"stderr 缺少 [读取失败]：{err!r}")
 
 
-def case_bad_plugins_dir():
+def case_missing_plugins_dir():
     code, out, err = call_cli(["-p", str(ROOT / "no_such_plugins_dir"), "validate", DEMO])
-    check(code == 1, f"插件目录不存在应 exit 1，实际 {code}")
-    check("[插件加载失败]" in err, f"stderr 缺少 [插件加载失败]：{err!r}")
+    check(code == 0, f"插件目录不存在应 exit 0，实际 {code}")
+    check("插件目录不存在" in err, f"stderr 应含目录警告：{err!r}")
+    check("[校验通过]" in out, f"默认目录仍应生效：{out!r}")
+
+
+def case_plugins_dir_before_after():
+    with tempfile.TemporaryDirectory(prefix="engine_cli_test_") as tmp:
+        root = Path(tmp)
+        dir_a = root / "a"
+        dir_b = root / "b"
+        dir_a.mkdir()
+        dir_b.mkdir()
+        write_zip(
+            dir_a, "clia.zip", {"clia/__init__.py": "", "clia/components.py": plugin_source("clia")}
+        )
+        write_zip(
+            dir_b, "clib.zip", {"clib/__init__.py": "", "clib/components.py": plugin_source("clib")}
+        )
+        before = call_cli(["-p", str(dir_a), "-p", str(dir_b), "plugins"])
+        after = call_cli(["plugins", "-p", str(dir_a), "-p", str(dir_b)])
+    check(
+        before[0] == 0,
+        f"-p 写在子命令前应 exit 0，实际 {before[0]}；stderr：{before[2]!r}",
+    )
+    check(
+        after[0] == 0,
+        f"-p 写在子命令后应 exit 0，实际 {after[0]}；stderr：{after[2]!r}",
+    )
+    check(before[1] == after[1], "两种写法的输出应一致")
+    check(
+        "clia" in before[1] and "clib" in before[1],
+        f"两个目录的插件都应加载：{before[1]!r}",
+    )
 
 
 def case_plugins_command():
@@ -135,7 +166,8 @@ CASES = [
     ("run 坏文件 exit 1", case_run_bad),
     ("不存在的文件 exit 1", case_missing_file),
     ("非法 JSON 文件 exit 1", case_invalid_json_file),
-    ("插件目录不存在 exit 1", case_bad_plugins_dir),
+    ("插件目录不存在 exit 0 + 警告", case_missing_plugins_dir),
+    ("-p 写在子命令前后输出一致", case_plugins_dir_before_after),
     ("plugins 子命令列出插件与组件", case_plugins_command),
 ]
 

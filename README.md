@@ -11,6 +11,7 @@
 - **插件是 zip 包**：`plugins/<插件名>.zip`，声明与实现分离。
 - **类型不写进工作流**：端口类型来自插件 schema，JSON 里只写连到哪个节点的哪个端口。
 - **只管 DAG**：循环暂不支持，有环直接报错。
+- **引擎能独立跑**：只把 `engine/` 拷走就能用，不依赖 studio、frontend，也不依赖任何具体插件。
 
 ## 目录
 
@@ -50,6 +51,16 @@ python -m engine run workflows/linreg_demo.json
 
 跑通的示例会打印每个节点的耗时和输出摘要，最后给出 MSE / RMSE / MAE / R²。
 
+**插件从哪加载**
+
+默认扫两处：工程里的 `plugins/`（跟当前工作目录无关，永远是这个目录），加上 `-p/--plugins-dir` 指定的目录，可以写多个：
+
+```bash
+python -m engine run --plugins-dir D:\workspace\space --plugins-dir C:\analy_env auto_analy.json
+```
+
+每个目录只扫一层 `*.zip`，不递归。目录不存在只警告并跳过，不中断。想只用自定义目录，把工程里的 `plugins/` 删掉即可。不同目录出现同名插件会直接报错，不会静默覆盖。
+
 **3. 起可视化编辑器**
 
 ```bash
@@ -63,7 +74,7 @@ python -m studio --port 8765
 Studio 的其他参数：
 
 ```bash
-python -m studio --plugins plugins --host 127.0.0.1 --port 8765
+python -m studio --plugins-dir D:\workspace\space --host 127.0.0.1 --port 8765
 ```
 
 ## 工作流长什么样
@@ -143,7 +154,7 @@ python tests/studio_api.py     # Web 后端接口
 python tools/who_owns.py --audit   # 检查每个文件都有负责人
 ```
 
-`tests/` 下 8 个文件、125 个用例。每个文件也能单独运行，例如 `python tests/test_loader.py`。
+`tests/` 下 9 个文件、132 个用例。每个文件也能单独运行，例如 `python tests/test_loader.py`。
 
 ## 开发约定
 
