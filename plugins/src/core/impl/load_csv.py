@@ -1,6 +1,6 @@
 """读取 CSV 文件。"""
 
-from engine.api import Component
+from engine.api import Component, expand_env
 
 
 class LoadCSV(Component):
@@ -38,7 +38,7 @@ class LoadCSV(Component):
         return {"table": {"type": "std_1.0@table", "title": "数据表"}}
 
     def __init__(self, config):
-        self.path = config["path"]
+        self.path = expand_env(config["path"])
         self.encoding = config["encoding"]
 
     def invoke(self):

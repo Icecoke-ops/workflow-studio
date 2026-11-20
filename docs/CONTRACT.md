@@ -175,6 +175,7 @@ class LoadCSV(Component):
 ```json
 {
   "name": "linreg_demo",
+  "env": {"DATA_DIR": "D:\\data"},
   "nodes": [
     {"id": "n1", "plugin": "linreg", "component": "MakeLinearData",
      "config": {...}, "inputs": {}},
@@ -185,12 +186,46 @@ class LoadCSV(Component):
 }
 ```
 
-- 字段白名单：顶层 `name`/`nodes`；节点 `id`/`plugin`/`component`/`config`/`inputs`；连线 `from`/`port`。未知字段报错。
+- 字段白名单：顶层 `name`/`nodes`/`env`；节点 `id`/`plugin`/`component`/`config`/`inputs`；连线 `from`/`port`。未知字段报错。
 - **类型不写进 JSON**，只来自插件 schema。
 - 边记在输入侧；一个输入端口只能有一个来源。
 - 无输入的节点即起点，没有特殊 start 节点。
 - 文件编码必须是 UTF-8（可带 BOM）；GBK 等其它编码直接报错。
 - `name` 必须是字符串；省略可以，写成 `null`/数字/布尔会被拒。
+
+### 5.1 环境变量
+
+工作流运行时，引擎把三类来源合并进 `os.environ`，同名时高级别覆盖低级别：
+
+| 级别 | 来源 | 例子 |
+|---|---|---|
+| 一级 | 引擎自动注入 | `workspace`、`engine_version`、`workflow`、`run_id` |
+| 二级 | 工作流 JSON 顶层 `env` | `"env": {"DATA_DIR": "D:\\data"}` |
+| 三级 | 命令行 `-e/--env` | `-e DATA_DIR=D:\data` |
+
+优先级：**三级 > 二级 > 一级**。
+
+内置变量：
+
+| 变量 | 值 |
+|---|---|
+| `workspace` | 进程启动时的工作目录（绝对路径） |
+| `engine_version` | 引擎版本 |
+| `workflow` | 本次运行的 JSON 绝对路径；Studio 下是写入 `%TEMP%\workflow-studio\` 的临时副本 |
+| `run_id` | 本次运行标识（时间戳 + 短随机串），每跑一次都不同 |
+
+**不建议**用二级或三级覆盖上面四个值。程序不拦，但把 `workspace` 写死成某台机器的路径后，换台机器就崩。
+
+时序：组件 `__init__` 里读到的必然是合并后的最终值。**不要在模块 import 时读环境变量**，那时三级还没应用。
+
+插件展开路径用 `engine.api.expand_env`：
+
+```python
+from engine.api import expand_env
+self.path = expand_env(config["path"])   # "${workspace}/data/x.csv"
+```
+
+只认 `${NAME}` 一种写法，未定义变量抛 `ValueError`，不做静默保留。
 
 ---
 
@@ -231,6 +266,7 @@ base: '/static/'      // 构建时生效，dev 用 '/'
 | 打包插件 | `python tools/build_plugins.py` |
 | 命令行引擎 | `python -m engine run <json>` / `validate` / `plugins` |
 | 指定插件目录 | `python -m engine run --plugins-dir <dir> --plugins-dir <dir> <json>` |
+| 指定环境变量 | `python -m engine -e DATA_DIR=D:\data -e MODEL_DIR=D:\models run <json>` |
 | 起 Web 服务 | `python -m studio --port 8765` |
 | 构建前端 | `python tools/build_web.py` |
 | 冒烟 | `python tests/smoke.py` |

@@ -8,9 +8,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import schema as schema_mod
+from .env import NAME_RE
 from .errors import WorkflowError
 
-ALLOWED_TOP = {"name", "nodes"}
+ALLOWED_TOP = {"name", "env", "nodes"}
 ALLOWED_NODE = {"id", "plugin", "component", "config", "inputs"}
 ALLOWED_EDGE = {"from", "port"}
 
@@ -30,6 +31,7 @@ class Workflow:
     name: str
     nodes: dict
     order: list = field(default_factory=list)
+    env: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -82,6 +84,17 @@ def validate(registry, raw):
     if not isinstance(name, str):
         errors.append(f"name 必须是字符串，实际 {type(name).__name__}")
         name = ""
+
+    env = raw.get("env", {})
+    if not isinstance(env, dict):
+        errors.append("env 必须是对象")
+        env = {}
+    else:
+        for key, value in env.items():
+            if not isinstance(key, str) or not NAME_RE.match(key):
+                errors.append(f"env 变量名不合法：{key!r}")
+            if not isinstance(value, str):
+                errors.append(f"env.{key} 的值必须是字符串")
 
     raw_nodes = raw.get("nodes")
     if not isinstance(raw_nodes, list) or not raw_nodes:
@@ -222,5 +235,5 @@ def validate(registry, raw):
         if not node.inputs and not children[node_id]:
             report.warnings.append(f"节点 {node_id} 是孤立节点（既没有输入也没有下游）")
 
-    report.workflow = Workflow(name=name, nodes=nodes, order=order)
+    report.workflow = Workflow(name=name, nodes=nodes, order=order, env=env)
     return report

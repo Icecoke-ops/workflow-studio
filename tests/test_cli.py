@@ -16,7 +16,7 @@ if str(ROOT) not in sys.path:
 
 from engine.cli import _force_utf8, main as cli_main
 
-from _harness import check, plugin_source, run_cases, write_zip
+from _harness import check, env_guard, plugin_source, run_cases, write_zip
 
 PLUGINS = str(ROOT / "plugins")
 DEMO = str(ROOT / "workflows" / "linreg_demo.json")
@@ -147,6 +147,122 @@ def case_plugins_dir_before_after():
     )
 
 
+def _env_probe_source():
+    """__init__ 在 run 时执行，此时 env 已按启动值 → 工作流 → 命令行的顺序写好；
+    把值打印出来，就能从 CLI 输出里读回最终生效的那一层。"""
+    return plugin_source(
+        "envprobe",
+        class_name="EnvProbe",
+        extra="import json\nimport os",
+        attrs='    KEYS = ("workspace", "engine_version", "run_id", "workflow", "A", "B")',
+        output_schema='{"value": {"type": "std_1.0@string"}}',
+        invoke_body='return {"value": "done"}',
+        init_body=(
+            'print("ENVDUMP " + json.dumps('
+            "{key: os.environ.get(key) for key in self.KEYS}))"
+        ),
+    )
+
+
+def _write_env_probe(tmp):
+    write_zip(
+        tmp,
+        "envprobe.zip",
+        {"envprobe/__init__.py": "", "envprobe/components.py": _env_probe_source()},
+    )
+
+
+def _env_probe_workflow(tmp, name, extra=None):
+    raw = {
+        "name": name,
+        "nodes": [
+            {
+                "id": "n1",
+                "plugin": "envprobe",
+                "component": "EnvProbe",
+                "config": {},
+                "inputs": {},
+            }
+        ],
+    }
+    if extra:
+        raw.update(extra)
+    path = Path(tmp) / f"{name}.json"
+    path.write_text(json.dumps(raw, ensure_ascii=False), encoding="utf-8")
+    return path
+
+
+def _read_env_dump(out):
+    for line in out.splitlines():
+        if line.startswith("ENVDUMP "):
+            return json.loads(line[len("ENVDUMP ") :])
+    raise AssertionError(f"run 输出里没有 ENVDUMP：{out!r}")
+
+
+def case_env_option_before_after():
+    with env_guard(), tempfile.TemporaryDirectory(prefix="engine_cli_env_") as tmp:
+        _write_env_probe(tmp)
+        wf = _env_probe_workflow(tmp, "envopts")
+        before = call_cli(["-e", "A=1", "-e", "B=2", "-p", tmp, "run", str(wf)])
+        after = call_cli(["-p", tmp, "run", str(wf), "-e", "A=1", "-e", "B=2"])
+    check(
+        before[0] == 0,
+        f"-e 写在子命令前应 exit 0，实际 {before[0]}；stderr：{before[2]!r}",
+    )
+    check(
+        after[0] == 0,
+        f"-e 写在子命令后应 exit 0，实际 {after[0]}；stderr：{after[2]!r}",
+    )
+    before_env = _read_env_dump(before[1])
+    after_env = _read_env_dump(after[1])
+    for where, dump in (("前", before_env), ("后", after_env)):
+        check(
+            (dump.get("A"), dump.get("B")) == ("1", "2"),
+            f"-e 写在子命令{where}没有生效：A={dump.get('A')!r} B={dump.get('B')!r}",
+        )
+    check(
+        before_env.get("A") == after_env.get("A")
+        and before_env.get("B") == after_env.get("B"),
+        "两种写法解析出的环境变量应一致",
+    )
+
+
+def case_env_option_invalid():
+    code, out, err = call_cli(["-e", "A", "-p", PLUGINS, "validate", DEMO])
+    check(code == 1, f"-e 缺 = 应 exit 1，实际 {code}")
+    check("[环境变量错误]" in err, f"stderr 缺少 [环境变量错误]：{err!r}")
+    check("'A'" in err, f"错误信息应指出非法项：{err!r}")
+
+
+def case_env_priority():
+    with env_guard(), tempfile.TemporaryDirectory(prefix="engine_cli_env_") as tmp:
+        _write_env_probe(tmp)
+        wf = _env_probe_workflow(
+            tmp,
+            "envpriority",
+            extra={"env": {"workspace": "WORKFLOW_LEVEL", "engine_version": "WORKFLOW_LEVEL"}},
+        )
+        code, out, err = call_cli(
+            ["-p", tmp, "-e", "workspace=CLI_LEVEL", "run", str(wf)]
+        )
+        dump = _read_env_dump(out)
+    check(code == 0, f"run 应 exit 0，实际 {code}；stderr：{err!r}")
+    for key in ("workspace", "engine_version", "run_id"):
+        check(dump.get(key) is not None, f"组件初始化时 {key} 应存在：{dump!r}")
+    check(
+        dump.get("workspace") == "CLI_LEVEL",
+        f"命令行应覆盖工作流 env，实际 {dump.get('workspace')!r}",
+    )
+    check(
+        dump.get("engine_version") == "WORKFLOW_LEVEL",
+        f"工作流 env 应覆盖启动值，实际 {dump.get('engine_version')!r}",
+    )
+    check(
+        dump.get("workflow") == str(wf.resolve()),
+        f"workflow 应是传入 JSON 的绝对路径，实际 {dump.get('workflow')!r}",
+    )
+
+
 def case_plugins_command():
     code, out, err = call_cli(["-p", PLUGINS, "plugins"])
     check(code == 0, f"plugins 子命令应 exit 0，实际 {code}；stderr：{err!r}")
@@ -168,6 +284,9 @@ CASES = [
     ("非法 JSON 文件 exit 1", case_invalid_json_file),
     ("插件目录不存在 exit 0 + 警告", case_missing_plugins_dir),
     ("-p 写在子命令前后输出一致", case_plugins_dir_before_after),
+    ("-e 写在子命令前后结果一致", case_env_option_before_after),
+    ("-e 缺 = 时 exit 1", case_env_option_invalid),
+    ("env 三级优先级：命令行 > 工作流 > 启动值", case_env_priority),
     ("plugins 子命令列出插件与组件", case_plugins_command),
 ]
 

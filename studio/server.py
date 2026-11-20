@@ -1,6 +1,6 @@
 """本地 Web API：给 Vue 前端提供插件查询、校验和执行接口。
 
-    python -m studio [--plugins-dir DIR ...] [--port 8765] [--host 127.0.0.1]
+    python -m studio [--plugins-dir DIR ...] [-e KEY=VALUE ...] [--port 8765] [--host 127.0.0.1]
 
 分层：:class:`EngineService` 只做业务（registry -> 契约载荷），
 :class:`StudioHandler` 只做 HTTP 路由/序列化/静态文件。
@@ -18,13 +18,19 @@
 import argparse
 import json
 import mimetypes
+import os
+import secrets
 import sys
+import tempfile
+import threading
+import time
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import unquote, urlsplit
 
 from engine import __version__ as ENGINE_VERSION
+from engine.env import parse_pairs, restore, snapshot
 from engine.errors import WorkflowError
 from engine.loader import DEFAULT_DIR
 from engine.preview import preview
@@ -45,8 +51,11 @@ from .contract import (
 __all__ = ["EngineService", "StudioServer", "main"]
 
 WEB_DIR = Path(__file__).resolve().parent / "web"
+TEMP_DIR = Path(tempfile.gettempdir()) / "workflow-studio"
 MAX_BODY = 16 * 1024 * 1024
 HINT_TEXT = "请先运行 python tools/build_web.py 构建前端"
+
+_RUN_LOCK = threading.Lock()
 
 _JSON = "application/json; charset=utf-8"
 _HTML = "text/html; charset=utf-8"
@@ -59,8 +68,9 @@ _HTML = "text/html; charset=utf-8"
 class EngineService(ApiService):
     """基于 engine 注册表的业务实现，不碰任何 HTTP 细节。"""
 
-    def __init__(self, registry):
+    def __init__(self, registry, cli_env=None):
         self.registry = registry
+        self.cli_env = dict(cli_env or {})
 
     def health(self):
         registry = self.registry
@@ -98,31 +108,49 @@ class EngineService(ApiService):
         return _report(validate(self.registry, workflow))
 
     def run(self, workflow):
+        with _RUN_LOCK:
+            return self._run_locked(workflow)
+
+    def _run_locked(self, workflow):
         report = validate(self.registry, workflow)
         payload = _report(report)
         payload["nodes"] = []
         if not report.ok:
             return payload
 
-        workflow_obj = report.workflow
-        done = {}
-        try:
-            run(
-                workflow_obj,
-                self.registry,
-                on_node_done=lambda node_id, result: done.update({node_id: result}),
-            )
-        except WorkflowError as exc:
-            message = str(exc)
-            payload["ok"] = False
-            payload["errors"] = [message]
-            payload["nodes"] = _nodes_payload(
-                workflow_obj, done, exc.node_id, message
-            )
-            return payload
+        run_id = time.strftime("%Y%m%d-%H%M%S") + "-" + secrets.token_hex(2)
+        TEMP_DIR.mkdir(parents=True, exist_ok=True)
+        path = TEMP_DIR / f"run_{run_id}.json"
+        path.write_text(json.dumps(workflow, ensure_ascii=False), encoding="utf-8")
 
-        payload["nodes"] = _nodes_payload(workflow_obj, done, None, None)
-        return payload
+        state = snapshot()
+        try:
+            os.environ.update({"workflow": str(path), "run_id": run_id})
+            os.environ.update(report.workflow.env)
+            os.environ.update(self.cli_env)
+
+            workflow_obj = report.workflow
+            done = {}
+            try:
+                run(
+                    workflow_obj,
+                    self.registry,
+                    on_node_done=lambda node_id, result: done.update({node_id: result}),
+                )
+            except WorkflowError as exc:
+                message = str(exc)
+                payload["ok"] = False
+                payload["errors"] = [message]
+                payload["nodes"] = _nodes_payload(
+                    workflow_obj, done, exc.node_id, message
+                )
+                return payload
+
+            payload["nodes"] = _nodes_payload(workflow_obj, done, None, None)
+            return payload
+        finally:
+            restore(state)
+            path.unlink(missing_ok=True)
 
 
 def _report(report):
@@ -356,7 +384,22 @@ def main(argv=None):
     )
     parser.add_argument("--host", default="127.0.0.1", help="监听地址（默认 127.0.0.1）")
     parser.add_argument("--port", type=int, default=8765, help="监听端口（默认 8765）")
+    parser.add_argument(
+        "-e",
+        "--env",
+        action="append",
+        default=None,
+        metavar="KEY=VALUE",
+        help="注入环境变量，可重复指定（优先级高于工作流 env）",
+    )
     args = parser.parse_args(argv)
+
+    try:
+        cli_env = parse_pairs(args.env or [])
+    except ValueError as exc:
+        print(f"[环境变量不合法] {exc}", file=sys.stderr)
+        return 1
+    os.environ.update({"workspace": os.getcwd(), "engine_version": ENGINE_VERSION})
 
     dirs = [DEFAULT_DIR] + (args.plugins_dir or [])
     try:
@@ -366,7 +409,7 @@ def main(argv=None):
         return 1
 
     try:
-        server = StudioServer((args.host, args.port), EngineService(registry))
+        server = StudioServer((args.host, args.port), EngineService(registry, cli_env))
     except OSError as exc:
         print(f"[启动失败] 无法监听 {args.host}:{args.port}：{exc}", file=sys.stderr)
         return 1

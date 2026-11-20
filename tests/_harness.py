@@ -3,8 +3,10 @@
 每个 test_*.py 只保留自己的用例，跑测循环统一走这里。
 """
 
+import os
 import traceback
 import zipfile
+from contextlib import contextmanager
 from pathlib import Path
 
 
@@ -26,6 +28,21 @@ def expect_raises(exc_type, fn, *fragments):
             f"期望 {exc_type.__name__}，实际 {type(exc).__name__}: {exc}"
         ) from None
     raise AssertionError(f"期望 {exc_type.__name__}，但没有抛异常")
+
+
+@contextmanager
+def env_guard():
+    """CLI 的 run 和 -e 会直接写 os.environ 且自己不还原，
+    同进程跑后续用例会读到上一轮的残值，所以这里整份快照并还原。"""
+    saved = dict(os.environ)
+    try:
+        yield
+    finally:
+        for key in set(os.environ) - set(saved):
+            os.environ.pop(key, None)
+        for key, value in saved.items():
+            if os.environ.get(key) != value:
+                os.environ[key] = value
 
 
 def run_cases(label, cases):
@@ -66,6 +83,7 @@ def component_source(
     config_body="return {}",
     invoke_body="return {}",
     with_invoke=True,
+    init_body="pass",
 ):
     lines = [
         f"class {class_name}(Component):",
@@ -89,7 +107,7 @@ def component_source(
             f"        return {output_schema}",
             "",
             "    def __init__(self, config):",
-            "        pass",
+            f"        {init_body}",
         ]
     )
     if with_invoke:
@@ -113,6 +131,7 @@ def plugin_source(
     config_body="return {}",
     invoke_body="return {}",
     with_invoke=True,
+    init_body="pass",
 ):
     """十几段临时插件源码只差元数据和端口 schema，收成一个模板，改加载器契约只改一处。"""
     if component is None:
@@ -124,6 +143,7 @@ def plugin_source(
             config_body=config_body,
             invoke_body=invoke_body,
             with_invoke=with_invoke,
+            init_body=init_body,
         )
     if components is None:
         components = f"COMPONENTS = [{class_name}]"

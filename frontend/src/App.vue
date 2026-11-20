@@ -4,11 +4,13 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 
 import ComponentNode from './components/ComponentNode.vue'
 import CollapsedRail from './components/CollapsedRail.vue'
+import EnvDrawer from './components/EnvDrawer.vue'
 import GraphCanvas from './components/GraphCanvas.vue'
 import Inspector from './components/Inspector.vue'
 import Palette from './components/Palette.vue'
 import ResultPanel from './components/ResultPanel.vue'
 import { fetchHealth, fetchPlugins, runWorkflow, validateWorkflow } from './api'
+import { attachEnv, envError, envToRows, rowsToEnv } from './workflow'
 
 const TYPE_COLORS = [
   '#409eff',
@@ -32,6 +34,8 @@ const typeColors = ref({})
 const nodes = ref([])
 const edges = ref([])
 const workflowName = ref('未命名工作流')
+const workflowEnv = ref([])
+const envDrawerVisible = ref(false)
 
 const validateReport = ref(null)
 const runResult = ref(null)
@@ -276,19 +280,41 @@ function buildWorkflow() {
     }
   }
 
-  return {
-    name: workflowName.value.trim() || '未命名工作流',
-    nodes: nodes.value.map((node) => ({
-      id: node.id,
-      plugin: node.data.plugin,
-      component: node.data.component,
-      config: { ...node.data.config },
-      inputs: inputsByTarget.get(node.id) || {},
-    })),
+  return attachEnv(
+    {
+      name: workflowName.value.trim() || '未命名工作流',
+      nodes: nodes.value.map((node) => ({
+        id: node.id,
+        plugin: node.data.plugin,
+        component: node.data.component,
+        config: { ...node.data.config },
+        inputs: inputsByTarget.get(node.id) || {},
+      })),
+    },
+    rowsToEnv(workflowEnv.value),
+  )
+}
+
+function importEnv(raw) {
+  if (raw.env === undefined) {
+    workflowEnv.value = []
+    return
   }
+  const rows = envToRows(raw.env)
+  if (rows === null) {
+    workflowEnv.value = []
+    ElMessage.warning('工作流顶层 env 不是对象，已忽略')
+    return
+  }
+  workflowEnv.value = rows
 }
 
 function exportJson() {
+  const problem = envError(workflowEnv.value)
+  if (problem) {
+    ElMessage.error(problem)
+    return
+  }
   const workflow = buildWorkflow()
   const text = JSON.stringify(workflow, null, 2)
   const blob = new Blob([text], { type: 'application/json' })
@@ -416,6 +442,7 @@ async function applyWorkflow(raw) {
   }
 
   workflowName.value = typeof raw.name === 'string' && raw.name ? raw.name : '导入的工作流'
+  importEnv(raw)
   nodes.value = created
   edges.value = newEdges
   validateReport.value = null
@@ -459,6 +486,7 @@ async function newWorkflow() {
   nodes.value = []
   edges.value = []
   workflowName.value = '未命名工作流'
+  workflowEnv.value = []
   validateReport.value = null
   runResult.value = null
   activeTab.value = 'validate'
@@ -560,6 +588,7 @@ onMounted(async () => {
       <el-button size="small" type="primary" :loading="busy === 'run'" @click="doRun">
         运行
       </el-button>
+      <el-button size="small" @click="envDrawerVisible = true">环境变量</el-button>
 
       <div class="spacer"></div>
 
@@ -646,6 +675,8 @@ onMounted(async () => {
       label="运行结果"
       @expand="togglePanel('bottom')"
     />
+
+    <EnvDrawer v-model:visible="envDrawerVisible" v-model:rows="workflowEnv" />
   </div>
 </template>
 

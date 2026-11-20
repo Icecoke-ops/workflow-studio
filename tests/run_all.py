@@ -15,9 +15,11 @@ ROOT = TESTS_DIR.parent
 ORDER = [
     "test_typeid.py",
     "test_schema.py",
+    "test_env.py",
     "test_loader.py",
     "test_workflow.py",
     "test_runner.py",
+    "test_csv.py",
     "test_cli.py",
     "test_preview.py",
     "test_contract.py",

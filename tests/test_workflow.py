@@ -311,6 +311,52 @@ def case_gbk_json():
         expect_raises(WorkflowError, lambda: load_workflow(path), "不是 UTF-8 编码")
 
 
+def case_env_valid():
+    raw = {
+        "name": "t",
+        "env": {"A": "1"},
+        "nodes": [node("n1", "linreg", "MakeLinearData")],
+    }
+    report = validate(get_registry(), raw)
+    check(report.ok, f"合法 env 应校验通过，实际错误：{report.errors}")
+    check(report.workflow is not None, "校验通过时应生成 Workflow")
+    check(
+        report.workflow.env == {"A": "1"},
+        f"Workflow.env 不对：{report.workflow.env!r}",
+    )
+
+
+def case_env_not_object():
+    raw = {
+        "name": "t",
+        "env": [],
+        "nodes": [node("n1", "linreg", "MakeLinearData")],
+    }
+    report = validate(get_registry(), raw)
+    expect_error(report, "env 必须是对象")
+
+
+def case_env_bad_name():
+    raw = {
+        "name": "t",
+        "env": {"1BAD": "x"},
+        "nodes": [node("n1", "linreg", "MakeLinearData")],
+    }
+    report = validate(get_registry(), raw)
+    expect_error(report, "env 变量名不合法", "1BAD")
+
+
+def case_env_bad_value_type():
+    for bad in (1, True):
+        raw = {
+            "name": "t",
+            "env": {"A": bad},
+            "nodes": [node("n1", "linreg", "MakeLinearData")],
+        }
+        report = validate(get_registry(), raw)
+        expect_error(report, "env.A 的值必须是字符串")
+
+
 CASES = [
     ("linreg_demo.json 校验通过且顺序正确", case_demo_valid),
     ("core.PredictModel 端口类型", case_predict_model_ports),
@@ -329,6 +375,10 @@ CASES = [
     ("config 取值不合法", case_config_value_invalid),
     ("config 未知参数", case_unknown_config_param),
     ("config 不是对象", case_config_not_dict),
+    ("env 合法对象通过并保留", case_env_valid),
+    ("env 不是对象", case_env_not_object),
+    ("env 变量名不合法", case_env_bad_name),
+    ("env 值必须是字符串", case_env_bad_value_type),
     ("连线未知字段", case_edge_unknown_field),
     ("nodes 不是非空数组", case_nodes_not_list),
     ("name 不是字符串", case_name_not_string),

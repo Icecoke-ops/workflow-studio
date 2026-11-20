@@ -9,7 +9,25 @@
 * 可选实现 ``close()``
 """
 
+import os
+import re
 from abc import ABC, abstractmethod
+
+_ENV_REF = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
+
+
+def expand_env(text):
+    """展开 ``${NAME}``；NAME 未定义时抛 ValueError 并指出名字。"""
+    if not isinstance(text, str):
+        return text
+
+    def substitute(match):
+        name = match.group(1)
+        if name not in os.environ:
+            raise ValueError(f"环境变量未定义：{name}")
+        return os.environ[name]
+
+    return _ENV_REF.sub(substitute, text)
 
 
 class Component(ABC):

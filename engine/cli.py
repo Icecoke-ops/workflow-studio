@@ -1,9 +1,14 @@
 """命令行入口：``python -m engine {plugins|validate|run}``。"""
 
 import argparse
+import os
+import secrets
 import sys
+import time
+from pathlib import Path
 
 from . import __version__
+from . import env as env_mod
 from .errors import WorkflowError
 from .loader import DEFAULT_DIR
 from .preview import preview
@@ -36,7 +41,7 @@ def _print_plugins(registry):
         print()
 
 
-def _run_report(registry, args):
+def _run_report(registry, args, cli_env):
     try:
         raw = load_workflow(args.file)
     except WorkflowError as exc:
@@ -59,6 +64,8 @@ def _run_report(registry, args):
         return 0
 
     print(f"[开始执行] {title}，{len(report.workflow.nodes)} 个节点")
+    os.environ.update(report.workflow.env)
+    os.environ.update(cli_env)
     try:
         results = run(report.workflow, registry)
     except WorkflowError as exc:
@@ -96,6 +103,17 @@ def _add_plugins_dir(parser, default):
     )
 
 
+def _add_env(parser, default):
+    parser.add_argument(
+        "-e",
+        "--env",
+        action="append",
+        default=default,
+        metavar="KEY=VALUE",
+        help="设置环境变量，可重复指定；在工作流 env 之后覆盖",
+    )
+
+
 def main(argv=None):
     _force_utf8(sys.stdout)
     _force_utf8(sys.stderr)
@@ -104,6 +122,7 @@ def main(argv=None):
         description=f"数据分析工作流执行引擎 v{__version__}",
     )
     _add_plugins_dir(parser, [])
+    _add_env(parser, [])
     sub = parser.add_subparsers(dest="command", required=True)
     plugins_parser = sub.add_parser("plugins", help="列出已加载的插件、组件和类型")
     _add_plugins_dir(plugins_parser, argparse.SUPPRESS)
@@ -113,8 +132,24 @@ def main(argv=None):
     run_parser = sub.add_parser("run", help="校验并执行工作流")
     run_parser.add_argument("file", help="工作流 JSON 文件")
     _add_plugins_dir(run_parser, argparse.SUPPRESS)
+    _add_env(run_parser, argparse.SUPPRESS)
 
     args = parser.parse_args(argv)
+
+    try:
+        cli_env = env_mod.parse_pairs(args.env)
+    except ValueError as exc:
+        print(f"[环境变量错误] {exc}", file=sys.stderr)
+        return 1
+
+    startup_env = {
+        "workspace": os.getcwd(),
+        "engine_version": __version__,
+        "run_id": f"{time.strftime('%Y%m%d%H%M%S')}{secrets.token_hex(2)}",
+    }
+    if getattr(args, "file", None):
+        startup_env["workflow"] = str(Path(args.file).resolve())
+    os.environ.update(startup_env)
 
     try:
         registry = Registry().load(DEFAULT_DIR, *args.plugins_dir)
@@ -126,7 +161,7 @@ def main(argv=None):
         _print_plugins(registry)
         return 0
 
-    return _run_report(registry, args)
+    return _run_report(registry, args, cli_env)
 
 
 if __name__ == "__main__":

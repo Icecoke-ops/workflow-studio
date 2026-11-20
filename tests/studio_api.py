@@ -6,11 +6,15 @@
 """
 
 import json
+import os
 import re
 import shutil
+import socket
+import subprocess
 import sys
 import tempfile
 import threading
+import time
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -18,7 +22,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
+from engine import __version__ as ENGINE_VERSION  # noqa: E402
 from engine.registry import Registry  # noqa: E402
+from studio import server as server_module  # noqa: E402
 from studio.contract import (  # noqa: E402
     ApiService,
     check_health,
@@ -36,6 +42,23 @@ def check(condition, message):
     if not condition:
         raise AssertionError(message)
     print(f"[OK] {message}")
+
+
+def free_port():
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        return sock.getsockname()[1]
+
+
+def wait_health(base, timeout=10.0):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            with urllib.request.urlopen(base + "/api/health", timeout=1) as response:
+                return json.loads(response.read().decode("utf-8"))
+        except Exception:
+            time.sleep(0.1)
+    return None
 
 
 class Api:
@@ -90,8 +113,11 @@ def main():
         check(status == 200, "GET /api/health 返回 200")
         check(content_type == "application/json; charset=utf-8", f"Content-Type = {content_type}")
         check(
-            body == {"ok": True, "engine": "0.1.0", "plugins": 3, "components": 6},
-            f"健康检查 {body}",
+            body["ok"] is True
+            and body["engine"] == ENGINE_VERSION
+            and body["plugins"] == 3
+            and body["components"] == 6,
+            f"健康检查 {body}（engine {ENGINE_VERSION}）",
         )
         check(check_health(body) == body, "health 响应通过 check_health")
 
@@ -211,12 +237,38 @@ def main():
         check(by_id["n2"]["outputs"]["model"], "n2 结果保留")
         check(by_id["n4"]["error"] is not None, "n4 标记失败原因")
 
-        # 7) web 目录为空时 GET / 给提示页
+        # 7) 环境变量不残留：第一次带 env，第二次不带，运行期各读一次
+        os.environ["STUDIO_ENV_TEST"] = "before"
+        original_run = server_module.run
+        seen = []
+
+        def spy_run(workflow_obj, registry, on_node_done=None):
+            seen.append(os.environ.get("STUDIO_ENV_TEST"))
+            return original_run(workflow_obj, registry, on_node_done)
+
+        server_module.run = spy_run
+        try:
+            with_env = json.loads(json.dumps(raw))
+            with_env["env"] = {"STUDIO_ENV_TEST": "one"}
+            status, _, body = api.json("/api/run", {"workflow": with_env})
+            check(status == 200 and body["ok"] is True, "带 env 的 run 成功")
+            status, _, body = api.json("/api/run", {"workflow": raw})
+            check(status == 200 and body["ok"] is True, "不带 env 的 run 成功")
+            check(seen == ["one", "before"], f"两次运行期环境 = {seen}")
+            check(
+                os.environ.get("STUDIO_ENV_TEST") == "before",
+                "run 结束后环境变量还原到运行前的值",
+            )
+        finally:
+            server_module.run = original_run
+            del os.environ["STUDIO_ENV_TEST"]
+
+        # 8) web 目录为空时 GET / 给提示页
         status, content_type, body = api.call("/")
         check(status == 200 and content_type.startswith("text/html"), f"GET / 返回 HTML（{content_type}）")
         check("python tools/build_web.py" in body, "提示页含构建命令")
 
-        # 8) 真实产物目录：静态文件能取到（含子目录），GET / 回 index.html
+        # 9) 真实产物目录：静态文件能取到（含子目录），GET / 回 index.html
         (web / "sub").mkdir()
         (web / "app.js").write_text("console.log('studio');\n", encoding="utf-8")
         (web / "sub" / "x.css").write_text(".studio { color: red; }\n", encoding="utf-8")
@@ -265,7 +317,7 @@ def main():
             "GET / 返回真实 index.html 而不是占位提示页",
         )
 
-        # 9) 未知路径 404，也是 JSON
+        # 10) 未知路径 404，也是 JSON
         status, content_type, body = api.call("/api/nope")
         check(
             status == 404
@@ -276,12 +328,36 @@ def main():
         status, _, body = api.call("/static/missing.js")
         check(status == 404 and json.loads(body)["ok"] is False, "缺失静态文件 404 JSON")
 
-        # 9) 非法 JSON 请求体
+        # 11) 非法 JSON 请求体
         status, _, body = api.json("/api/validate", raw="not json")
         check(
             status == 400 and body == {"ok": False, "errors": ["请求体不是合法 JSON"]},
             f"非法 JSON 请求体 {body}",
         )
+
+        # 12) 真实启动：python -m studio 走 main()，能起服务、health 正常
+        port = free_port()
+        process = subprocess.Popen(
+            [sys.executable, "-m", "studio", "--port", str(port)],
+            cwd=str(ROOT),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        try:
+            health = wait_health(f"http://127.0.0.1:{port}", timeout=10)
+            check(health is not None, f"python -m studio --port {port} 启动成功")
+            check(
+                health["ok"] is True and health["plugins"] >= 1,
+                f"真实进程健康检查 {health}",
+            )
+        finally:
+            process.terminate()
+            try:
+                process.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=10)
+        check(process.returncode is not None, "真实进程已退出")
 
         print("\nALL OK")
         return 0

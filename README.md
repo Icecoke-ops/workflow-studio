@@ -61,6 +61,27 @@ python -m engine run --plugins-dir D:\workspace\space --plugins-dir C:\analy_env
 
 每个目录只扫一层 `*.zip`，不递归。目录不存在只警告并跳过，不中断。想只用自定义目录，把工程里的 `plugins/` 删掉即可。不同目录出现同名插件会直接报错，不会静默覆盖。
 
+**环境变量**
+
+路径这类东西不必每次写全，用环境变量传：
+
+```bash
+python -m engine -e DATA_DIR=D:\data -e MODEL_DIR=D:\models run auto_analy.json
+```
+
+优先级从高到低：命令行 `-e` > 工作流 JSON 顶层 `env` > 引擎自动注入。
+
+引擎自动提供四个变量：`workspace`（启动时的工作目录）、`engine_version`（引擎版本）、`workflow`（本次运行的 JSON 路径）、`run_id`（每次运行唯一）。
+
+插件里用 `engine.api.expand_env` 就能引用它们：
+
+```python
+from engine.api import expand_env
+self.path = expand_env(config["path"])    # "${workspace}/data/sales.csv"
+```
+
+工作流自己需要的配置也能写在 JSON 顶层 `env` 里，可视化编辑器顶栏有「环境变量」按钮可以图形化编辑。
+
 **3. 起可视化编辑器**
 
 ```bash
@@ -154,7 +175,7 @@ python tests/studio_api.py     # Web 后端接口
 python tools/who_owns.py --audit   # 检查每个文件都有负责人
 ```
 
-`tests/` 下 9 个文件、132 个用例。每个文件也能单独运行，例如 `python tests/test_loader.py`。
+`tests/` 下 11 个文件、148 个用例。每个文件也能单独运行，例如 `python tests/test_loader.py`。
 
 ## 开发约定
 
