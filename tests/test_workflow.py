@@ -39,6 +39,16 @@ def node(node_id, plugin, component, config=None, inputs=None):
     }
 
 
+def source_node(node_id, extra_config=None):
+    """插件层不再有造数据组件，无输入的源节点统一是 fileio.LoadCSV。
+
+    validate 只校验 path 是字符串、不读文件，所以这里用一个占位路径即可。
+    """
+    config = {"path": "data.csv"}
+    config.update(extra_config or {})
+    return node(node_id, "fileio", "LoadCSV", config=config)
+
+
 def expect_error(report, *fragments):
     check(not report.ok, "期望校验失败，实际校验通过")
     text = "；".join(report.errors)
@@ -53,19 +63,29 @@ def expect_warning(report, *fragments):
 
 
 def case_demo_valid():
-    raw = load_workflow(ROOT / "workflows" / "linreg_demo.json")
+    raw = load_workflow(ROOT / "workflows" / "regression_demo.json")
     report = validate(get_registry(), raw)
-    check(report.ok, f"linreg_demo.json 应校验通过，实际错误：{report.errors}")
-    check(report.warnings == [], f"linreg_demo.json 不应有警告：{report.warnings}")
+    check(report.ok, f"regression_demo.json 应校验通过，实际错误：{report.errors}")
+    check(report.warnings == [], f"regression_demo.json 不应有警告：{report.warnings}")
     check(
-        report.order == ["n1", "n2", "n3", "n4"],
+        report.order == ["n1", "n2", "n3", "n4", "n5", "n6", "n7"],
         f"拓扑顺序不对：{report.order}",
     )
     check(report.workflow is not None, "校验通过时应生成 Workflow")
-    n3 = report.workflow.nodes["n3"]
+    n2 = report.workflow.nodes["n2"]
     check(
-        (n3.plugin, n3.component) == ("core", "PredictModel"),
-        f"n3 应为 core.PredictModel，实际 {n3.plugin}.{n3.component}",
+        (n2.plugin, n2.component) == ("split", "SplitTable"),
+        f"n2 应为 split.SplitTable，实际 {n2.plugin}.{n2.component}",
+    )
+    n4 = report.workflow.nodes["n4"]
+    check(
+        (n4.plugin, n4.component) == ("split", "SplitXY"),
+        f"n4 应为 split.SplitXY，实际 {n4.plugin}.{n4.component}",
+    )
+    n5 = report.workflow.nodes["n5"]
+    check(
+        (n5.plugin, n5.component) == ("core", "PredictModel"),
+        f"n5 应为 core.PredictModel，实际 {n5.plugin}.{n5.component}",
     )
 
 
@@ -90,7 +110,7 @@ def case_predict_model_ports():
 def case_unknown_top_field():
     raw = {
         "name": "t",
-        "nodes": [node("n1", "linreg", "MakeLinearData")],
+        "nodes": [source_node("n1")],
         "extra": 1,
     }
     report = validate(get_registry(), raw)
@@ -98,7 +118,7 @@ def case_unknown_top_field():
 
 
 def case_node_unknown_field():
-    bad = node("n1", "linreg", "MakeLinearData")
+    bad = source_node("n1")
     bad["bogus"] = 1
     report = validate(get_registry(), {"name": "t", "nodes": [bad]})
     expect_error(report, "未知字段", "bogus")
@@ -108,8 +128,8 @@ def case_duplicate_id():
     raw = {
         "name": "t",
         "nodes": [
-            node("n1", "linreg", "MakeLinearData"),
-            node("n1", "linreg", "MakeLinearData"),
+            source_node("n1"),
+            source_node("n1"),
         ],
     }
     report = validate(get_registry(), raw)
@@ -125,9 +145,10 @@ def case_component_not_found():
 def case_input_port_not_found():
     n1 = node(
         "n1",
-        "linreg",
-        "MakeLinearData",
-        inputs={"bogus": {"from": "n1", "port": "data"}},
+        "table",
+        "SelectColumns",
+        config={"columns": ["x"]},
+        inputs={"bogus": {"from": "n1", "port": "table"}},
     )
     report = validate(get_registry(), {"name": "t", "nodes": [n1]})
     expect_error(report, "组件没有这个输入端口")
@@ -135,14 +156,14 @@ def case_input_port_not_found():
 
 def case_output_port_not_found():
     nodes = [
-        node("n1", "linreg", "MakeLinearData"),
+        source_node("n1"),
         node(
             "n2",
             "core",
             "PredictModel",
             inputs={
                 "model": {"from": "n1", "port": "nope"},
-                "data": {"from": "n1", "port": "data"},
+                "data": {"from": "n1", "port": "table"},
             },
         ),
     ]
@@ -152,14 +173,14 @@ def case_output_port_not_found():
 
 def case_type_mismatch():
     nodes = [
-        node("n1", "linreg", "MakeLinearData"),
+        source_node("n1"),
         node(
             "n2",
             "core",
             "PredictModel",
             inputs={
-                "model": {"from": "n1", "port": "data"},
-                "data": {"from": "n1", "port": "data"},
+                "model": {"from": "n1", "port": "table"},
+                "data": {"from": "n1", "port": "table"},
             },
         ),
     ]
@@ -168,7 +189,14 @@ def case_type_mismatch():
 
 
 def case_required_input_missing():
-    nodes = [node("n1", "linreg", "FitLinearRegression")]
+    nodes = [
+        node(
+            "n1",
+            "ml",
+            "LinearRegression",
+            config={"feature": ["x"], "target": "y"},
+        )
+    ]
     report = validate(get_registry(), {"name": "t", "nodes": nodes})
     expect_error(report, "缺少必填输入", "data")
 
@@ -177,8 +205,9 @@ def case_source_node_missing():
     nodes = [
         node(
             "n1",
-            "linreg",
-            "FitLinearRegression",
+            "ml",
+            "LinearRegression",
+            config={"feature": ["x"], "target": "y"},
             inputs={"data": {"from": "ghost", "port": "data"}},
         )
     ]
@@ -190,16 +219,16 @@ def case_cycle():
     nodes = [
         node(
             "a",
-            "core",
+            "table",
             "SelectColumns",
-            config={"columns": "x"},
+            config={"columns": ["x"]},
             inputs={"data": {"from": "b", "port": "table"}},
         ),
         node(
             "b",
-            "core",
+            "table",
             "SelectColumns",
-            config={"columns": "y"},
+            config={"columns": ["y"]},
             inputs={"data": {"from": "a", "port": "table"}},
         ),
     ]
@@ -208,7 +237,7 @@ def case_cycle():
 
 
 def case_isolated_node_warning_only():
-    raw = {"name": "t", "nodes": [node("n1", "linreg", "MakeLinearData")]}
+    raw = {"name": "t", "nodes": [source_node("n1")]}
     report = validate(get_registry(), raw)
     check(report.ok, f"孤立节点不应产生错误，实际错误：{report.errors}")
     expect_warning(report, "孤立节点", "n1")
@@ -216,28 +245,28 @@ def case_isolated_node_warning_only():
 
 
 def case_defaults_filled():
-    raw = {"name": "t", "nodes": [node("n1", "linreg", "MakeLinearData")]}
+    raw = {"name": "t", "nodes": [source_node("n1")]}
     report = validate(get_registry(), raw)
     check(report.ok, f"校验应通过，实际错误：{report.errors}")
     config = report.workflow.nodes["n1"].config
-    check(config.get("n_samples") == 200, f"n_samples 默认值没填上：{config}")
-    check(config.get("noise") == 0.5, f"noise 默认值没填上：{config}")
-    check(config.get("seed") == 42, f"seed 默认值没填上：{config}")
+    check(config.get("encoding") == "utf-8", f"encoding 默认值没填上：{config}")
+    check(config.get("sep") == ",", f"sep 默认值没填上：{config}")
+    check(config.get("header") is True, f"header 默认值没填上：{config}")
 
 
 def case_config_value_invalid():
     raw = {
         "name": "t",
-        "nodes": [node("n1", "linreg", "MakeLinearData", config={"n_samples": 1.5})],
+        "nodes": [source_node("n1", {"path": 1.5})],
     }
     report = validate(get_registry(), raw)
-    expect_error(report, "需要整数")
+    expect_error(report, "需要字符串")
 
 
 def case_unknown_config_param():
     raw = {
         "name": "t",
-        "nodes": [node("n1", "linreg", "MakeLinearData", config={"bogus": 1})],
+        "nodes": [source_node("n1", {"bogus": 1})],
     }
     report = validate(get_registry(), raw)
     expect_error(report, "未知参数", "bogus")
@@ -246,7 +275,7 @@ def case_unknown_config_param():
 def case_config_not_dict():
     raw = {
         "name": "t",
-        "nodes": [node("n1", "linreg", "MakeLinearData", config=[])],
+        "nodes": [node("n1", "fileio", "LoadCSV", config=[])],
     }
     report = validate(get_registry(), raw)
     expect_error(report, "config 必须是 JSON 对象")
@@ -254,12 +283,13 @@ def case_config_not_dict():
 
 def case_edge_unknown_field():
     nodes = [
-        node("n1", "linreg", "MakeLinearData"),
+        source_node("n1"),
         node(
             "n2",
-            "linreg",
-            "FitLinearRegression",
-            inputs={"data": {"from": "n1", "port": "data", "extra": 1}},
+            "ml",
+            "LinearRegression",
+            config={"feature": ["x"], "target": "y"},
+            inputs={"data": {"from": "n1", "port": "table", "extra": 1}},
         ),
     ]
     report = validate(get_registry(), {"name": "t", "nodes": nodes})
@@ -275,7 +305,7 @@ def case_name_not_string():
     for bad in (123, 0, False, None, ["x"]):
         raw = {
             "name": bad,
-            "nodes": [node("n1", "linreg", "MakeLinearData")],
+            "nodes": [source_node("n1")],
         }
         report = validate(get_registry(), raw)
         expect_error(report, "name 必须是字符串")
@@ -292,7 +322,7 @@ def case_load_workflow_errors():
 
 
 def case_bom_json():
-    raw = {"name": "t", "nodes": [node("n1", "linreg", "MakeLinearData")]}
+    raw = {"name": "t", "nodes": [source_node("n1")]}
     with tempfile.TemporaryDirectory(prefix="engine_workflow_test_") as tmp:
         path = Path(tmp) / "bom.json"
         path.write_bytes(
@@ -315,7 +345,7 @@ def case_env_valid():
     raw = {
         "name": "t",
         "env": {"A": "1"},
-        "nodes": [node("n1", "linreg", "MakeLinearData")],
+        "nodes": [source_node("n1")],
     }
     report = validate(get_registry(), raw)
     check(report.ok, f"合法 env 应校验通过，实际错误：{report.errors}")
@@ -330,7 +360,7 @@ def case_env_not_object():
     raw = {
         "name": "t",
         "env": [],
-        "nodes": [node("n1", "linreg", "MakeLinearData")],
+        "nodes": [source_node("n1")],
     }
     report = validate(get_registry(), raw)
     expect_error(report, "env 必须是对象")
@@ -340,7 +370,7 @@ def case_env_bad_name():
     raw = {
         "name": "t",
         "env": {"1BAD": "x"},
-        "nodes": [node("n1", "linreg", "MakeLinearData")],
+        "nodes": [source_node("n1")],
     }
     report = validate(get_registry(), raw)
     expect_error(report, "env 变量名不合法", "1BAD")
@@ -351,14 +381,14 @@ def case_env_bad_value_type():
         raw = {
             "name": "t",
             "env": {"A": bad},
-            "nodes": [node("n1", "linreg", "MakeLinearData")],
+            "nodes": [source_node("n1")],
         }
         report = validate(get_registry(), raw)
         expect_error(report, "env.A 的值必须是字符串")
 
 
 CASES = [
-    ("linreg_demo.json 校验通过且顺序正确", case_demo_valid),
+    ("regression_demo.json 校验通过且顺序正确", case_demo_valid),
     ("core.PredictModel 端口类型", case_predict_model_ports),
     ("未知顶层字段", case_unknown_top_field),
     ("节点未知字段", case_node_unknown_field),

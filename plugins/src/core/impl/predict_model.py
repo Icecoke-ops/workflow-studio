@@ -19,7 +19,6 @@ class PredictModel(Component):
                 "title": "预测列名",
                 "desc": "生成的预测值写进这一列，不能与已有列重名",
                 "default": "y_pred",
-                "required": True,
             }
         }
 

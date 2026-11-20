@@ -10,7 +10,8 @@ import Inspector from './components/Inspector.vue'
 import Palette from './components/Palette.vue'
 import ResultPanel from './components/ResultPanel.vue'
 import { fetchHealth, fetchPlugins, runWorkflow, validateWorkflow } from './api'
-import { attachEnv, envError, envToRows, rowsToEnv } from './workflow'
+import { buildWorkflow as modelBuildWorkflow, defaultsFor } from './model'
+import { envError, envToRows } from './workflow'
 
 const TYPE_COLORS = [
   '#409eff',
@@ -159,16 +160,6 @@ function portDisplay(types, labels) {
 
 // ---- 节点构造 ----------------------------------------------------------
 
-function defaultsFor(schema) {
-  const config = {}
-  for (const [name, spec] of Object.entries(schema || {})) {
-    if (spec && Object.prototype.hasOwnProperty.call(spec, 'default')) {
-      config[name] = structuredClone(spec.default)
-    }
-  }
-  return config
-}
-
 function buildNodeData(component, config) {
   return {
     plugin: component.plugin,
@@ -270,29 +261,12 @@ function onConnect(connection) {
 // ---- 导入 / 导出 -------------------------------------------------------
 
 function buildWorkflow() {
-  const inputsByTarget = new Map()
-  for (const edge of edges.value) {
-    if (!edge.source || !edge.target || !edge.targetHandle || !edge.sourceHandle) continue
-    if (!inputsByTarget.has(edge.target)) inputsByTarget.set(edge.target, {})
-    inputsByTarget.get(edge.target)[edge.targetHandle] = {
-      from: edge.source,
-      port: edge.sourceHandle,
-    }
-  }
-
-  return attachEnv(
-    {
-      name: workflowName.value.trim() || '未命名工作流',
-      nodes: nodes.value.map((node) => ({
-        id: node.id,
-        plugin: node.data.plugin,
-        component: node.data.component,
-        config: { ...node.data.config },
-        inputs: inputsByTarget.get(node.id) || {},
-      })),
-    },
-    rowsToEnv(workflowEnv.value),
-  )
+  return modelBuildWorkflow({
+    name: workflowName.value,
+    nodes: nodes.value,
+    edges: edges.value,
+    envRows: workflowEnv.value,
+  })
 }
 
 function importEnv(raw) {

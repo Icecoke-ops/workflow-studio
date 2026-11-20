@@ -18,8 +18,11 @@
 | 目录 | 内容 |
 |---|---|
 | `engine/` | 工作流引擎：加载、校验、排序、执行、CLI，零第三方依赖 |
-| `plugins/src/core/` | 示例插件：`LoadCSV`、`SelectColumns`、`PredictModel` |
-| `plugins/src/linreg/` | 示例插件：`MakeLinearData`、`FitLinearRegression`、`Evaluate` |
+| `plugins/src/fileio/` | 数据读写：CSV / JSON / Excel 的加载与保存（5 个组件） |
+| `plugins/src/table/` | 数据处理：选列改列、过滤排序、缺失值、值计数（11 个组件） |
+| `plugins/src/split/` | 数据划分：切训练/测试集、按列拆特征 X 与目标 Y（2 个组件） |
+| `plugins/src/ml/` | 机器学习：5 个回归模型 + 回归评估（依赖 scikit-learn） |
+| `plugins/src/core/` | 模型应用：`PredictModel`，接任何符合 `std_1.0@model` 的模型 |
 | `studio/` | 本地 Web 后端（标准库 `ThreadingHTTPServer`）+ 前端构建产物 |
 | `frontend/` | Vite + Vue 3 可视化编辑器源码 |
 | `tools/` | 打包插件、构建前端、查文件负责人 |
@@ -27,12 +30,26 @@
 | `workflows/` | 示例工作流 |
 | `docs/` | 契约文档与文件归属表 |
 
+## 内置组件
+
+插件按**职责**分包，依赖也跟着分开：装不装 scikit-learn 决定你能不能用 `ml`，跟读不读 CSV 无关。
+
+| 插件 | 组件 |
+|---|---|
+| `fileio`（pandas、openpyxl） | `LoadCSV` `LoadJSON` `LoadExcel` `SaveCSV` `SaveExcel` |
+| `table`（pandas） | `SelectColumns` `DropColumns` `RenameColumns` `CastColumn` `FilterRows` `SortRows` `HeadRows` `ConcatTables` `FillMissing` `DropMissing` `ValueCounts` |
+| `split`（pandas、numpy） | `SplitTable` `SplitXY` |
+| `ml`（scikit-learn） | `LinearRegression` `Ridge` `Lasso` `RandomForestRegressor` `GradientBoostingRegressor` `EvaluateRegression` |
+| `core`（无第三方依赖） | `PredictModel` |
+
+`SplitTable` 输出 `train` 和 `test` 两个端口；`SplitXY` 输出特征表 `x` 和目标表 `y`，分别接预测和评估。`PredictModel` 接任何 `std_1.0@model`，所以模型插件换了也不用改流程。
+
 ## 快速开始
 
-需要 Python 3.12。示例插件依赖 `numpy` 和 `pandas`：
+需要 Python 3.12。示例插件依赖 `pandas`、`numpy`、`openpyxl`、`scikit-learn`：
 
 ```bash
-pip install numpy pandas
+pip install pandas numpy openpyxl scikit-learn
 ```
 
 **1. 打包插件**（源码在 `plugins/src/`，打包成 `plugins/*.zip`）
@@ -41,15 +58,26 @@ pip install numpy pandas
 python tools/build_plugins.py
 ```
 
-**2. 命令行跑一个工作流**
+**2. 准备数据**
+
+示例工作流从 `${workspace}/data.csv` 读数据，仓库不附带任何数据文件。在工作目录放一个两列 CSV 就行，`x` 是特征、`y` 是目标：
+
+```csv
+x,y
+0.0,1.2
+1.0,3.1
+2.0,4.9
+```
+
+**3. 命令行跑一个工作流**
 
 ```bash
 python -m engine plugins                          # 列出插件、类型、组件和端口
-python -m engine validate workflows/linreg_demo.json
-python -m engine run workflows/linreg_demo.json
+python -m engine validate workflows/regression_demo.json
+python -m engine run workflows/regression_demo.json
 ```
 
-跑通的示例会打印每个节点的耗时和输出摘要，最后给出 MSE / RMSE / MAE / R²。
+跑通的示例会打印每个节点的耗时和输出摘要，最后给出 MSE / RMSE / MAE / R² / MAPE。
 
 **插件从哪加载**
 
@@ -82,7 +110,7 @@ self.path = expand_env(config["path"])    # "${workspace}/data/sales.csv"
 
 工作流自己需要的配置也能写在 JSON 顶层 `env` 里，可视化编辑器顶栏有「环境变量」按钮可以图形化编辑。
 
-**3. 起可视化编辑器**
+**4. 起可视化编辑器**
 
 ```bash
 npm --prefix frontend install      # 首次需要
@@ -102,21 +130,28 @@ python -m studio --plugins-dir D:\workspace\space --host 127.0.0.1 --port 8765
 
 ```json
 {
-  "name": "linreg_demo",
+  "name": "regression_demo",
   "nodes": [
     {
       "id": "n1",
-      "plugin": "linreg",
-      "component": "MakeLinearData",
-      "config": { "n_samples": 200, "slope": 2.0, "intercept": 1.0, "noise": 0.5, "seed": 42 },
+      "plugin": "fileio",
+      "component": "LoadCSV",
+      "config": { "path": "${workspace}/data.csv" },
       "inputs": {}
     },
     {
       "id": "n2",
-      "plugin": "linreg",
-      "component": "FitLinearRegression",
-      "config": { "feature": "x", "target": "y" },
-      "inputs": { "data": { "from": "n1", "port": "data" } }
+      "plugin": "split",
+      "component": "SplitTable",
+      "config": { "seed": 42 },
+      "inputs": { "data": { "from": "n1", "port": "table" } }
+    },
+    {
+      "id": "n3",
+      "plugin": "ml",
+      "component": "LinearRegression",
+      "config": { "feature": ["x"], "target": "y" },
+      "inputs": { "data": { "from": "n2", "port": "train" } }
     }
   ]
 }
@@ -175,7 +210,7 @@ python tests/studio_api.py     # Web 后端接口
 python tools/who_owns.py --audit   # 检查每个文件都有负责人
 ```
 
-`tests/` 下 11 个文件、148 个用例。每个文件也能单独运行，例如 `python tests/test_loader.py`。
+`tests/` 下 15 个文件、218 个用例。每个文件也能单独运行，例如 `python tests/test_loader.py`。
 
 ## 开发约定
 

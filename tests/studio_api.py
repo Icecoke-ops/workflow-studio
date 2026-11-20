@@ -5,8 +5,10 @@
 插件临时打到系统临时目录，跑完清理，不往仓库里丢东西。
 """
 
+import csv
 import json
 import os
+import random
 import re
 import shutil
 import socket
@@ -35,7 +37,7 @@ from studio.contract import (  # noqa: E402
 from studio.server import EngineService, StudioServer  # noqa: E402
 from tools.build_plugins import build_all  # noqa: E402
 
-DEMO = ROOT / "workflows" / "linreg_demo.json"
+DEMO = ROOT / "workflows" / "regression_demo.json"
 
 
 def check(condition, message):
@@ -91,11 +93,21 @@ class Api:
 
 def main():
     temp = Path(tempfile.mkdtemp(prefix="studio_api_"))
+    workspace = temp / "workspace"
+    workspace.mkdir()
+    rng = random.Random(42)
+    with (workspace / "data.csv").open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(["x", "y"])
+        for _ in range(200):
+            x = rng.uniform(0.0, 10.0)
+            writer.writerow([x, 2.0 * x + 1.0 + rng.gauss(0.0, 0.5)])
+    os.environ["workspace"] = str(workspace)
     server = None
     thread = None
     try:
         built = build_all(temp / "plugins")
-        check(len(built) == 2, f"打包出 {len(built)} 个插件")
+        check(len(built) == 5, f"打包出 {len(built)} 个插件")
         registry = Registry().load(temp / "plugins")
 
         service = EngineService(registry)
@@ -115,22 +127,23 @@ def main():
         check(
             body["ok"] is True
             and body["engine"] == ENGINE_VERSION
-            and body["plugins"] == 3
-            and body["components"] == 6,
+            and body["plugins"] == 6
+            and body["components"] == 25,
             f"健康检查 {body}（engine {ENGINE_VERSION}）",
         )
         check(check_health(body) == body, "health 响应通过 check_health")
 
-        # 2) 插件列表：std 是内置类型插件，core / linreg 只出组件
+        # 2) 插件列表：std 是内置类型插件，其余插件只出组件
         status, _, body = api.json("/api/plugins")
         plugins = {item["name"]: item for item in body["plugins"]}
         check(
-            status == 200 and set(plugins) == {"std", "core", "linreg"},
+            status == 200
+            and set(plugins) == {"std", "core", "fileio", "ml", "split", "table"},
             f"插件 {sorted(plugins)}",
         )
         check(check_plugins(body) == body, "plugins 响应通过 check_plugins")
         total = sum(len(item["components"]) for item in plugins.values())
-        check(total == 6, f"组件数 {total}")
+        check(total == 25, f"组件数 {total}")
 
         std = plugins["std"]
         check(
@@ -152,20 +165,38 @@ def main():
             registry.plugins["std"].source == "<builtin>",
             f"std 来源 {registry.plugins['std'].source}",
         )
-        fit = next(c for c in plugins["linreg"]["components"] if c["name"] == "FitLinearRegression")
-        data_port = fit["input_schema"]["data"]
+        linear = next(c for c in plugins["ml"]["components"] if c["name"] == "LinearRegression")
+        data_port = linear["input_schema"]["data"]
         check(
             data_port["types"] == ["std_1.0@table"]
             and data_port["type_labels"] == ["std@table"]
             and data_port["required"] is True
             and data_port["title"] == "训练数据",
-            f"FitLinearRegression.input_schema.data = {data_port}",
+            f"ml.LinearRegression.input_schema.data = {data_port}",
         )
-        model_port = fit["output_schema"]["model"]
+        model_port = linear["output_schema"]["model"]
         check(
             model_port["type"] == "std_1.0@model"
             and model_port["type_label"] == "std@model",
-            f"FitLinearRegression.output_schema.model = {model_port}",
+            f"ml.LinearRegression.output_schema.model = {model_port}",
+        )
+        select = next(c for c in plugins["table"]["components"] if c["name"] == "SelectColumns")
+        check(
+            select["config_schema"]["columns"]["type"] == "array",
+            f"table.SelectColumns.columns 是数组：{select['config_schema']['columns']}",
+        )
+        split_xy = next(c for c in plugins["split"]["components"] if c["name"] == "SplitXY")
+        check(
+            split_xy["input_schema"]["data"]["types"] == ["std_1.0@table"]
+            and split_xy["output_schema"]["x"]["type"] == "std_1.0@table"
+            and split_xy["output_schema"]["y"]["type"] == "std_1.0@table",
+            "split.SplitXY 输入 data、输出 x/y 都是 std@table",
+        )
+        load_csv = next(c for c in plugins["fileio"]["components"] if c["name"] == "LoadCSV")
+        check(
+            load_csv["input_schema"] == {}
+            and load_csv["output_schema"]["table"]["type"] == "std_1.0@table",
+            "fileio.LoadCSV 无输入、输出 table（std@table）",
         )
         predict = next(c for c in plugins["core"]["components"] if c["name"] == "PredictModel")
         check(
@@ -178,8 +209,8 @@ def main():
             predict["output_schema"]["predictions"]["type_label"] == "std@table",
             "core.PredictModel.predictions 的 type_label = std@table",
         )
-        original = registry.components[("linreg", "FitLinearRegression")]
-        check(fit["config_schema"] == original.config_schema, "config_schema 原样返回")
+        original = registry.components[("ml", "LinearRegression")]
+        check(linear["config_schema"] == original.config_schema, "config_schema 原样返回")
 
         raw = json.loads(DEMO.read_text(encoding="utf-8"))
 
@@ -189,12 +220,15 @@ def main():
             status == 200 and body["ok"] is True and body["errors"] == [],
             f"validate 通过，order={body['order']}",
         )
-        check(body["order"] == ["n1", "n2", "n3", "n4"], "拓扑顺序 n1 -> n2 -> n3 -> n4")
+        check(
+            body["order"] == ["n1", "n2", "n3", "n4", "n5", "n6", "n7"],
+            "拓扑顺序 n1 -> n2 -> n3 -> n4 -> n5 -> n6 -> n7",
+        )
         check(check_validate(body) == body, "validate 通过响应通过 check_validate")
 
         # 4) 校验拒绝
         bad = json.loads(json.dumps(raw))
-        bad["nodes"][2]["inputs"]["model"] = {"from": "n1", "port": "data"}
+        bad["nodes"][4]["inputs"]["model"] = {"from": "n1", "port": "table"}
         status, _, body = api.json("/api/validate", {"workflow": bad})
         joined = " | ".join(body["errors"])
         check(
@@ -209,33 +243,42 @@ def main():
         check(status == 200 and body["ok"] is True and body["errors"] == [], "run 执行成功")
         check(check_run(body) == body, "run 成功响应通过 check_run")
         nodes = body["nodes"]
-        check([n["id"] for n in nodes] == ["n1", "n2", "n3", "n4"], f"节点顺序 {[n['id'] for n in nodes]}")
+        check(
+            [n["id"] for n in nodes] == ["n1", "n2", "n3", "n4", "n5", "n6", "n7"],
+            f"节点顺序 {[n['id'] for n in nodes]}",
+        )
         check({n["id"] for n in nodes} == set(body["order"]), "ok=true 时 nodes 覆盖全部 order")
         check(all(n["error"] is None for n in nodes), "所有节点 error 均为 null")
         check(
             all(isinstance(n["ms"], (int, float)) and n["ms"] >= 0 for n in nodes),
             "每个节点都带毫秒耗时",
         )
-        check(nodes[1]["outputs"]["model"], "n2 输出 model 预览非空")
-        metrics = nodes[3]["outputs"]["metrics"]
+        check(nodes[2]["outputs"]["model"], "n3 输出 model 预览非空")
+        check(nodes[4]["outputs"]["predictions"], "n5 输出 predictions 预览非空")
+        metrics = nodes[5]["outputs"]["metrics"]
         match = re.search(r"\br2\s+([0-9.]+)", metrics)
-        check(match is not None, "n4 指标表含 r2")
+        check(match is not None, "n6 指标表含 r2")
         check(float(match.group(1)) > 0.95, f"r2 = {match.group(1)} > 0.95")
+        check((workspace / "regression_out.csv").is_file(), "n7 按 ${workspace} 写出 CSV")
 
         # 6) 执行期异常：200 + ok:false，已完成的节点照常返回
         broken = json.loads(json.dumps(raw))
-        broken["nodes"][3]["config"]["target"] = "nope"
+        broken["nodes"][5]["config"]["target"] = "nope"
         status, _, body = api.json("/api/run", {"workflow": broken})
         check(status == 200 and body["ok"] is False, "执行期异常返回 200 + ok:false")
         check(bool(body["errors"]), "执行失败时 errors 非空")
         check(check_run(body) == body, "run 失败响应通过 check_run")
         joined = " | ".join(body["errors"])
-        check("n4" in joined and "列不存在" in joined, f"错误信息带节点与原因：{joined}")
+        check("n6" in joined and "列不存在" in joined, f"错误信息带节点与原因：{joined}")
         by_id = {n["id"]: n for n in body["nodes"]}
-        check(set(by_id) == {"n1", "n2", "n3", "n4"}, f"已完成的节点仍在：{sorted(by_id)}")
-        check(by_id["n1"]["error"] is None and by_id["n1"]["outputs"]["data"], "n1 结果保留")
-        check(by_id["n2"]["outputs"]["model"], "n2 结果保留")
-        check(by_id["n4"]["error"] is not None, "n4 标记失败原因")
+        check(
+            set(by_id) == {"n1", "n2", "n3", "n4", "n5", "n6"},
+            f"已完成节点仍在：{sorted(by_id)}",
+        )
+        check(by_id["n1"]["error"] is None and by_id["n1"]["outputs"]["table"], "n1 结果保留")
+        check(by_id["n3"]["outputs"]["model"], "n3 结果保留")
+        check(by_id["n5"]["outputs"]["predictions"], "n5 结果保留")
+        check(by_id["n6"]["error"] is not None, "n6 标记失败原因")
 
         # 7) 环境变量不残留：第一次带 env，第二次不带，运行期各读一次
         os.environ["STUDIO_ENV_TEST"] = "before"
@@ -359,9 +402,22 @@ def main():
                 process.wait(timeout=10)
         check(process.returncode is not None, "真实进程已退出")
 
+        released = False
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            try:
+                with socket.socket() as probe:
+                    probe.bind(("127.0.0.1", port))
+                released = True
+                break
+            except OSError:
+                time.sleep(0.1)
+        check(released, f"端口 {port} 已释放")
+
         print("\nALL OK")
         return 0
     finally:
+        os.environ.pop("workspace", None)
         if server is not None:
             server.shutdown()
             server.server_close()

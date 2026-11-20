@@ -5,6 +5,7 @@
 
 import gc
 import importlib
+import os
 import sys
 import tempfile
 import zipfile
@@ -20,7 +21,7 @@ from engine.registry import Registry
 from engine.runner import run
 from engine.workflow import NodeSpec, Workflow, load_workflow, validate
 
-from _harness import check, expect_raises, run_cases
+from _harness import check, env_guard, expect_raises, run_cases, write_demo_data
 
 
 _RUNNER_SOURCE = '''\
@@ -464,23 +465,38 @@ def case_model_contract_satisfied():
 
 
 def case_end_to_end_demo():
-    """linreg 训练 → core.PredictModel 预测 → linreg 评估。"""
-    registry = Registry().load(ROOT / "plugins")
-    raw = load_workflow(ROOT / "workflows" / "linreg_demo.json")
-    report = validate(registry, raw)
-    check(report.ok, f"示例工作流应校验通过：{report.errors}")
+    """regression_demo：读 CSV → 切分 → SplitXY → 训练 → 预测 → 评估 → 存盘。
 
-    results = run(report.workflow, registry)
-    model = results["n2"].outputs["model"]
-    check(
-        isinstance(model, PredictorModel),
-        f"linreg 模型应继承 PredictorModel：{type(model).__name__}",
-    )
-    predictions = results["n3"].outputs["predictions"]
-    check("y_pred" in predictions.columns, f"预测列应存在：{list(predictions.columns)}")
-    metrics = results["n4"].outputs["metrics"].set_index("metric")["value"]
-    r2 = float(metrics["r2"])
-    check(r2 > 0.95, f"R² = {r2:.4f} 应 > 0.95")
+    ${workspace} 指向临时目录：n1 读那里的 data.csv，n7 往那里写 regression_out.csv，
+    不往工程根目录落文件。
+    """
+    registry = Registry().load(ROOT / "plugins")
+    with tempfile.TemporaryDirectory(prefix="engine_runner_demo_") as tmp, env_guard():
+        os.environ["workspace"] = tmp
+        write_demo_data(tmp)
+        raw = load_workflow(ROOT / "workflows" / "regression_demo.json")
+        report = validate(registry, raw)
+        check(report.ok, f"示例工作流应校验通过：{report.errors}")
+
+        results = run(report.workflow, registry)
+        model = results["n3"].outputs["model"]
+        check(
+            isinstance(model, PredictorModel),
+            f"ml 模型应继承 PredictorModel：{type(model).__name__}",
+        )
+        predictions = results["n5"].outputs["predictions"]
+        check(
+            "y_pred" in predictions.columns,
+            f"预测列应存在：{list(predictions.columns)}",
+        )
+        metrics = results["n6"].outputs["metrics"].set_index("metric")["value"]
+        r2 = float(metrics["r2"])
+        check(r2 > 0.95, f"R² = {r2:.4f} 应 > 0.95")
+        check(
+            (Path(tmp) / "regression_out.csv").is_file(),
+            "SaveCSV 应把指标表写到 ${workspace} 下",
+        )
+        check(results["n7"].outputs == {}, "SaveCSV 返回空输出应被接受")
 
 
 CASES = [

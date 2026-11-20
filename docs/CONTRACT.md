@@ -55,12 +55,12 @@
 只做注册，实现写在别的模块里：
 
 ```python
-from core.impl.load_csv import LoadCSV
+from table.impl.columns import SelectColumns
 
-PLUGIN_NAME = "core"          # [A-Za-z][A-Za-z0-9_]*
+PLUGIN_NAME = "table"         # [A-Za-z][A-Za-z0-9_]*
 PLUGIN_VERSION = "1.0"        # \d+\.\d+
-PLUGIN_TITLE = "基础组件"
-COMPONENTS = [LoadCSV]
+PLUGIN_TITLE = "数据处理"
+COMPONENTS = [SelectColumns]
 ```
 
 ### 2.3 组件类
@@ -174,14 +174,14 @@ class LoadCSV(Component):
 
 ```json
 {
-  "name": "linreg_demo",
+  "name": "regression_demo",
   "env": {"DATA_DIR": "D:\\data"},
   "nodes": [
-    {"id": "n1", "plugin": "linreg", "component": "MakeLinearData",
-     "config": {...}, "inputs": {}},
-    {"id": "n2", "plugin": "linreg", "component": "FitLinearRegression",
-     "config": {...},
-     "inputs": {"data": {"from": "n1", "port": "data"}}}
+    {"id": "n1", "plugin": "fileio", "component": "LoadCSV",
+     "config": {"path": "${workspace}/data.csv"}, "inputs": {}},
+    {"id": "n2", "plugin": "ml", "component": "LinearRegression",
+     "config": {"feature": ["x"], "target": "y"},
+     "inputs": {"data": {"from": "n1", "port": "table"}}}
   ]
 }
 ```
@@ -235,7 +235,7 @@ self.path = expand_env(config["path"])   # "${workspace}/data/x.csv"
 
 | 方法 | 路径 | 响应 |
 |---|---|---|
-| GET | `/api/health` | `{"ok":true,"engine":"0.1.0","plugins":3,"components":6}` |
+| GET | `/api/health` | `{"ok":true,"engine":"0.3.0","plugins":6,"components":25}` |
 | GET | `/api/plugins` | `{"plugins":[{name,version,title,types:[{id,desc}],components:[{name,title,desc,config_schema,input_schema,output_schema}]}]}` |
 | POST | `/api/validate` | 请求 `{"workflow":{...}}` → `{"ok":bool,"errors":[],"warnings":[],"order":[]}` |
 | POST | `/api/run` | 请求同上 → `{"ok":bool,"errors":[],"warnings":[],"order":[],"nodes":[{id,component,ms,outputs:{端口:preview},"error":null}]}` |

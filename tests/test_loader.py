@@ -54,11 +54,23 @@ def case_real_plugins_load():
     core = load_plugin(ROOT / "plugins" / "core.zip", set())
     check(core.name == "core", f"core.zip 插件名不对：{core.name!r}")
     check(core.version == "1.0", f"core.zip 版本不对：{core.version!r}")
-    check(len(core.components) == 3, f"core 应有 3 个组件：{core.components}")
+    check(len(core.components) == 1, f"core 应有 1 个组件：{core.components}")
 
-    linreg = load_plugin(ROOT / "plugins" / "linreg.zip", set())
-    check(linreg.name == "linreg", f"linreg.zip 插件名不对：{linreg.name!r}")
-    check(len(linreg.components) == 3, f"linreg 应有 3 个组件：{linreg.components}")
+    fileio = load_plugin(ROOT / "plugins" / "fileio.zip", set())
+    check(fileio.name == "fileio", f"fileio.zip 插件名不对：{fileio.name!r}")
+    check(len(fileio.components) == 5, f"fileio 应有 5 个组件：{fileio.components}")
+
+    table = load_plugin(ROOT / "plugins" / "table.zip", set())
+    check(table.name == "table", f"table.zip 插件名不对：{table.name!r}")
+    check(len(table.components) == 11, f"table 应有 11 个组件：{table.components}")
+
+    split = load_plugin(ROOT / "plugins" / "split.zip", set())
+    check(split.name == "split", f"split.zip 插件名不对：{split.name!r}")
+    check(len(split.components) == 2, f"split 应有 2 个组件：{split.components}")
+
+    ml = load_plugin(ROOT / "plugins" / "ml.zip", set())
+    check(ml.name == "ml", f"ml.zip 插件名不对：{ml.name!r}")
+    check(len(ml.components) == 6, f"ml 应有 6 个组件：{ml.components}")
 
     registry = Registry().load(ROOT / "plugins")
     check(
@@ -67,9 +79,10 @@ def case_real_plugins_load():
     )
     check("std_1.0@model" in registry.types, "std_1.0@model 应内置")
     check(
-        sorted(registry.plugins) == ["core", "linreg", "std"],
+        sorted(registry.plugins) == ["core", "fileio", "ml", "split", "std", "table"],
         f"插件集合应含内置 std：{sorted(registry.plugins)}",
     )
+    check(len(registry.components) == 25, f"组件总数应为 25：{len(registry.components)}")
 
 
 def case_missing_init():
@@ -569,18 +582,18 @@ def case_reload_same_dir():
     first = Registry().load(ROOT / "plugins")
     second = Registry().load(ROOT / "plugins")
     check(
-        sorted(first.plugins) == ["core", "linreg", "std"],
+        sorted(first.plugins) == ["core", "fileio", "ml", "split", "std", "table"],
         f"第一次插件：{sorted(first.plugins)}",
     )
     check(
-        sorted(second.plugins) == ["core", "linreg", "std"],
+        sorted(second.plugins) == ["core", "fileio", "ml", "split", "std", "table"],
         f"第二次插件：{sorted(second.plugins)}",
     )
-    check(len(first.components) == 6, f"第一次组件数：{len(first.components)}")
-    check(len(second.components) == 6, f"第二次组件数：{len(second.components)}")
+    check(len(first.components) == 25, f"第一次组件数：{len(first.components)}")
+    check(len(second.components) == 25, f"第二次组件数：{len(second.components)}")
     check(first.types == second.types, "两次加载的类型集合应一致")
-    first_cls = first.get_component("core", "LoadCSV").cls
-    second_cls = second.get_component("core", "LoadCSV").cls
+    first_cls = first.get_component("fileio", "LoadCSV").cls
+    second_cls = second.get_component("fileio", "LoadCSV").cls
     check(
         first_cls is not second_cls,
         "同一目录重复 load 应真正重载：组件类不能是同一个对象",
@@ -766,7 +779,7 @@ def case_port_level_error_paths():
 
 CASES = [
     ("合法临时插件可加载", case_good_plugin_loads),
-    ("真实 core.zip / linreg.zip 可加载", case_real_plugins_load),
+    ("真实插件 zip 可加载", case_real_plugins_load),
     ("缺 __init__.py 报错", case_missing_init),
     ("顶层两个目录报错", case_two_top_dirs),
     ("没有子目录报错", case_no_subdirectory),

@@ -66,6 +66,68 @@ def run_cases(label, cases):
     return 0
 
 
+def instantiate(registry, plugin, name, config=None):
+    """按引擎的方式补默认值再实例化。
+
+    直接调组件时必须先补默认值，否则要么 KeyError，要么测试自己手抄一份默认值、
+    改产品默认值时悄无声息地脱节。
+    """
+    from engine.schema import fill_defaults
+
+    entry = registry.get_component(plugin, name)
+    if entry is None:
+        raise AssertionError(f"组件不存在：{plugin}.{name}")
+    return entry.cls(fill_defaults(entry.config_schema, config or {}))
+
+
+def invoke(registry, plugin, name, config=None, **inputs):
+    instance = instantiate(registry, plugin, name, config)
+    try:
+        return instance.invoke(**inputs)
+    finally:
+        instance.close()
+
+
+def write_source_csv(directory, filename="data.csv"):
+    """写一份最小 CSV；工作流用例的数据来源都从这里来。"""
+    path = Path(directory) / filename
+    path.write_text("x,y\n0,1\n1,3\n2,5\n", encoding="utf-8")
+    return path
+
+
+def write_demo_data(directory, filename="data.csv"):
+    """regression_demo 的输入数据：y = 2x + 1 + 0.5*N(0,1)，200 行，R² 约 0.99。
+
+    别用 3 行的迷你 CSV：20% 的测试集只剩 1 行，sklearn 的 r2 会打
+    UndefinedMetricWarning 到 stderr，CLI 用例会因此误判「有错误输出」。
+    """
+    import numpy as np
+
+    rng = np.random.default_rng(42)
+    x = rng.uniform(0.0, 10.0, 200)
+    y = 2.0 * x + 1.0 + rng.normal(0.0, 0.5, 200)
+    lines = ["x,y"] + [f"{a},{b}" for a, b in zip(x, y)]
+    path = Path(directory) / filename
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return path
+
+
+def source_node(directory, node_id="n1", filename="data.csv"):
+    """table 类工作流的源头：写一个临时 CSV 并返回 ``fileio.LoadCSV`` 节点。
+
+    插件层没有「造数据」组件了，要真正 run 的用例都得先落一个文件；路径用绝对路径，
+    调用方就不用再为每个用例折腾 ``${workspace}``。
+    """
+    path = write_source_csv(directory, filename)
+    return {
+        "id": node_id,
+        "plugin": "fileio",
+        "component": "LoadCSV",
+        "config": {"path": str(path)},
+        "inputs": {},
+    }
+
+
 def write_zip(directory, filename, entries):
     path = Path(directory) / filename
     with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as archive:

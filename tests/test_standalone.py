@@ -63,7 +63,7 @@ def case_third_party_plugin_runs():
         )
         check(
             sorted(registry.plugins) == ["solo", "std"],
-            f"不应依赖 core/linreg：{sorted(registry.plugins)}",
+            f"不应依赖 core/fileio/ml/split/table：{sorted(registry.plugins)}",
         )
 
         raw = {

@@ -5,6 +5,7 @@
 
 import io
 import json
+import os
 import sys
 import tempfile
 from contextlib import redirect_stderr, redirect_stdout
@@ -16,10 +17,17 @@ if str(ROOT) not in sys.path:
 
 from engine.cli import _force_utf8, main as cli_main
 
-from _harness import check, env_guard, plugin_source, run_cases, write_zip
+from _harness import (
+    check,
+    env_guard,
+    plugin_source,
+    run_cases,
+    write_demo_data,
+    write_zip,
+)
 
 PLUGINS = str(ROOT / "plugins")
-DEMO = str(ROOT / "workflows" / "linreg_demo.json")
+DEMO = str(ROOT / "workflows" / "regression_demo.json")
 
 
 def call_cli(argv):
@@ -61,6 +69,7 @@ def case_validate_ok():
     check(code == 0, f"validate 好文件应 exit 0，实际 {code}；stderr：{err!r}")
     check("[校验通过]" in out, f"缺少 [校验通过]：{out!r}")
     check("n1" in out, f"输出里应包含节点 id：{out!r}")
+    check("n7" in out, f"输出里应包含末尾节点 id：{out!r}")
     check(err == "", f"好文件不应输出错误：{err!r}")
 
 
@@ -76,11 +85,24 @@ def case_validate_bad():
 
 
 def case_run_ok():
-    code, out, err = call_cli(["-p", PLUGINS, "run", DEMO])
+    # CLI 把 workspace 设成进程工作目录；demo 从那里读 data.csv、写 regression_out.csv。
+    # 切到临时目录跑，先放好输入文件，别在工程根目录留东西。
+    with tempfile.TemporaryDirectory(prefix="engine_cli_test_") as tmp:
+        write_demo_data(tmp)
+        previous = os.getcwd()
+        os.chdir(tmp)
+        try:
+            code, out, err = call_cli(["-p", PLUGINS, "run", DEMO])
+        finally:
+            os.chdir(previous)
+        check(
+            (Path(tmp) / "regression_out.csv").is_file(),
+            "SaveCSV 应把结果写到进程工作目录（${workspace}）下",
+        )
     check(code == 0, f"run 好文件应 exit 0，实际 {code}；stderr：{err!r}")
     check("[开始执行]" in out, f"缺少 [开始执行]：{out!r}")
     check("[完成]" in out, f"缺少 [完成]：{out!r}")
-    for node_id in ("n1", "n2", "n3", "n4"):
+    for node_id in ("n1", "n2", "n3", "n4", "n5", "n6", "n7"):
         check(node_id in out, f"运行输出里应包含节点 {node_id}：{out!r}")
     check(err == "", f"run 好文件不应输出错误：{err!r}")
 
@@ -266,7 +288,7 @@ def case_env_priority():
 def case_plugins_command():
     code, out, err = call_cli(["-p", PLUGINS, "plugins"])
     check(code == 0, f"plugins 子命令应 exit 0，实际 {code}；stderr：{err!r}")
-    for token in ("core", "linreg", "LoadCSV", "MakeLinearData"):
+    for token in ("core", "fileio", "table", "split", "ml", "LoadCSV", "PredictModel"):
         check(token in out, f"输出里应包含 {token}：{out!r}")
     check("类型" in out, f"输出里应包含类型清单：{out!r}")
     check("组件" in out, f"输出里应包含组件清单：{out!r}")

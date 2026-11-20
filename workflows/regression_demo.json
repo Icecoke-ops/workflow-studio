@@ -1,0 +1,81 @@
+{
+  "name": "regression_demo",
+  "nodes": [
+    {
+      "id": "n1",
+      "plugin": "fileio",
+      "component": "LoadCSV",
+      "config": {
+        "path": "${workspace}/data.csv"
+      },
+      "inputs": {}
+    },
+    {
+      "id": "n2",
+      "plugin": "split",
+      "component": "SplitTable",
+      "config": {
+        "seed": 42
+      },
+      "inputs": {
+        "data": { "from": "n1", "port": "table" }
+      }
+    },
+    {
+      "id": "n3",
+      "plugin": "ml",
+      "component": "LinearRegression",
+      "config": {
+        "feature": ["x"],
+        "target": "y"
+      },
+      "inputs": {
+        "data": { "from": "n2", "port": "train" }
+      }
+    },
+    {
+      "id": "n4",
+      "plugin": "split",
+      "component": "SplitXY",
+      "config": {
+        "feature": ["x"],
+        "target": "y"
+      },
+      "inputs": {
+        "data": { "from": "n2", "port": "test" }
+      }
+    },
+    {
+      "id": "n5",
+      "plugin": "core",
+      "component": "PredictModel",
+      "inputs": {
+        "model": { "from": "n3", "port": "model" },
+        "data": { "from": "n4", "port": "x" }
+      }
+    },
+    {
+      "id": "n6",
+      "plugin": "ml",
+      "component": "EvaluateRegression",
+      "config": {
+        "target": "y"
+      },
+      "inputs": {
+        "true_data": { "from": "n4", "port": "y" },
+        "predictions": { "from": "n5", "port": "predictions" }
+      }
+    },
+    {
+      "id": "n7",
+      "plugin": "fileio",
+      "component": "SaveCSV",
+      "config": {
+        "path": "${workspace}/regression_out.csv"
+      },
+      "inputs": {
+        "data": { "from": "n6", "port": "metrics" }
+      }
+    }
+  ]
+}

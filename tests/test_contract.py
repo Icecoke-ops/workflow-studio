@@ -6,6 +6,7 @@
 import copy
 import json
 import sys
+import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -22,9 +23,9 @@ from studio.contract import (
 )
 from studio.server import EngineService
 
-from _harness import check, expect_raises, run_cases
+from _harness import check, expect_raises, run_cases, write_demo_data
 
-DEMO = ROOT / "workflows" / "linreg_demo.json"
+DEMO = ROOT / "workflows" / "regression_demo.json"
 
 
 # --------------------------------------------------------------------------
@@ -89,7 +90,7 @@ def run_payload():
     payload["nodes"] = [
         {
             "id": "n1",
-            "component": "linreg.FitLinearRegression",
+            "component": "ml.LinearRegression",
             "ms": 1.5,
             "outputs": {},
             "error": None,
@@ -226,28 +227,32 @@ def case_run_accepts():
 
 def case_real_service_payloads():
     registry = Registry().load(ROOT / "plugins")
-    service = EngineService(registry)
+    # 直接构造服务时没有 studio 启动时注入的 workspace；demo 的 n1 从
+    # ${workspace}/data.csv 读数据、n7 往那里写文件，所以用临时目录顶替。
+    with tempfile.TemporaryDirectory(prefix="engine_contract_test_") as tmp:
+        write_demo_data(tmp)
+        service = EngineService(registry, {"workspace": tmp})
 
-    health = service.health()
-    check(check_health(health) == health, f"health 响应未通过契约：{health}")
+        health = service.health()
+        check(check_health(health) == health, f"health 响应未通过契约：{health}")
 
-    plugins = service.plugins()
-    check(check_plugins(plugins) == plugins, "plugins 响应未通过契约")
+        plugins = service.plugins()
+        check(check_plugins(plugins) == plugins, "plugins 响应未通过契约")
 
-    workflow = json.loads(DEMO.read_text(encoding="utf-8"))
+        workflow = json.loads(DEMO.read_text(encoding="utf-8"))
 
-    validated = service.validate(workflow)
-    check(check_validate(validated) == validated, f"validate 响应未通过契约：{validated}")
+        validated = service.validate(workflow)
+        check(check_validate(validated) == validated, f"validate 响应未通过契约：{validated}")
 
-    executed = service.run(workflow)
-    check(executed["ok"] is True, f"示例工作流应执行成功：{executed.get('errors')}")
-    check(check_run(executed) == executed, "run 成功响应未通过契约")
+        executed = service.run(workflow)
+        check(executed["ok"] is True, f"示例工作流应执行成功：{executed.get('errors')}")
+        check(check_run(executed) == executed, "run 成功响应未通过契约")
 
-    broken = copy.deepcopy(workflow)
-    broken["nodes"][3]["config"]["target"] = "nope"
-    failed = service.run(broken)
-    check(failed["ok"] is False, "坏列名应在执行期失败")
-    check(check_run(failed) == failed, "run 失败响应未通过契约")
+        broken = copy.deepcopy(workflow)
+        broken["nodes"][5]["config"]["target"] = "nope"
+        failed = service.run(broken)
+        check(failed["ok"] is False, "坏列名应在执行期失败")
+        check(check_run(failed) == failed, "run 失败响应未通过契约")
 
 
 CASES = [

@@ -19,11 +19,15 @@ ORDER = [
     "test_loader.py",
     "test_workflow.py",
     "test_runner.py",
-    "test_csv.py",
+    "test_fileio.py",
+    "test_table.py",
+    "test_split.py",
+    "test_ml.py",
     "test_cli.py",
     "test_preview.py",
     "test_contract.py",
     "test_standalone.py",
+    "test_frontend.py",
 ]
 
 
