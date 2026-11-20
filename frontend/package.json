@@ -1,0 +1,18 @@
+{
+  "name": "workflow-studio",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@vitejs/plugin-vue": "^6.0.11",
+    "@vue-flow/core": "^1.48.2",
+    "element-plus": "^2.14.8",
+    "vite": "^8.3.8",
+    "vue": "^3.5.45"
+  }
+}

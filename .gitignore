@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.py[cod]
+
+# 构建产物：由 tools/build_plugins.py 和 tools/build_web.py 生成
+plugins/*.zip
+frontend/dist/
+studio/web/
+
+# 前端依赖
+node_modules/
+
+# 编辑器 / 系统
+.vscode/
+.idea/
+Thumbs.db
+.DS_Store
+
+# 日志与临时
+*.log

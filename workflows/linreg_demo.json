@@ -1,0 +1,57 @@
+{
+  "name": "linreg_demo",
+  "nodes": [
+    {
+      "id": "n1",
+      "plugin": "linreg",
+      "component": "MakeLinearData",
+      "config": {
+        "n_samples": 200,
+        "slope": 2.0,
+        "intercept": 1.0,
+        "noise": 0.5,
+        "x_max": 10.0,
+        "seed": 42
+      },
+      "inputs": {}
+    },
+    {
+      "id": "n2",
+      "plugin": "linreg",
+      "component": "FitLinearRegression",
+      "config": {
+        "feature": "x",
+        "target": "y",
+        "fit_intercept": true
+      },
+      "inputs": {
+        "data": { "from": "n1", "port": "data" }
+      }
+    },
+    {
+      "id": "n3",
+      "plugin": "core",
+      "component": "PredictModel",
+      "config": {
+        "output_column": "y_pred"
+      },
+      "inputs": {
+        "model": { "from": "n2", "port": "model" },
+        "data": { "from": "n1", "port": "data" }
+      }
+    },
+    {
+      "id": "n4",
+      "plugin": "linreg",
+      "component": "Evaluate",
+      "config": {
+        "target": "y",
+        "pred_column": "y_pred"
+      },
+      "inputs": {
+        "true_data": { "from": "n1", "port": "data" },
+        "predictions": { "from": "n3", "port": "predictions" }
+      }
+    }
+  ]
+}
