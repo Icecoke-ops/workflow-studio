@@ -2,7 +2,7 @@
   "_comment": "文件归属表。最长前缀优先匹配。改这里之前先找 Chief。",
 
   "rules": [
-    { "owner": "chief",   "paths": ["docs/", "engine/api.py", "engine/stdtypes.py", "studio/contract.py", "tools/who_owns.py", "tests/smoke.py"] },
+    { "owner": "chief",   "paths": ["docs/", "README.md", "LICENSE", ".gitignore", "engine/api.py", "engine/stdtypes.py", "studio/contract.py", "tools/who_owns.py", "tests/smoke.py"] },
     { "owner": "engine",  "paths": ["engine/", "plugins/", "tools/", "workflows/"] },
     { "owner": "studio",  "paths": ["studio/", "tests/studio_api.py"] },
     { "owner": "vue",     "paths": ["frontend/", "tools/build_web.py"] },
