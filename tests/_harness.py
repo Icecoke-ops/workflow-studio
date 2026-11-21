@@ -32,6 +32,10 @@ def get_registry():
     缓存能成立的真实原因是「用到它的文件都排在 test_cli 之前」——test_cli 会
     重新 load 插件并 purge 模块，但那之后 registry 里保存的类对象仍然可用。
     新加的测试若要用这个缓存，仍放在 test_cli 前面；否则自己 Registry().load()。
+
+    例外：pickle/joblib 按「模块名 + 类名」反查类，purge 后缓存的类就与
+    sys.modules 里的不是同一个对象了（会报 Can't pickle ...: it's not the same
+    object）。要序列化插件里的对象，自己 Registry().load() 拿一份新注册表。
     """
     global _REGISTRY
     if _REGISTRY is None:

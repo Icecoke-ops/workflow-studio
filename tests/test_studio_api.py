@@ -128,7 +128,7 @@ def main():
             body["ok"] is True
             and body["engine"] == ENGINE_VERSION
             and body["plugins"] == 6
-            and body["components"] == 25,
+            and body["components"] == 27,
             f"健康检查 {body}（engine {ENGINE_VERSION}）",
         )
         check(check_health(body) == body, "health 响应通过 check_health")
@@ -143,7 +143,7 @@ def main():
         )
         check(check_plugins(body) == body, "plugins 响应通过 check_plugins")
         total = sum(len(item["components"]) for item in plugins.values())
-        check(total == 25, f"组件数 {total}")
+        check(total == 27, f"组件数 {total}")
 
         std = plugins["std"]
         check(

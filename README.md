@@ -21,14 +21,14 @@
 | `plugins/src/fileio/` | 数据读写：CSV / JSON / Excel 的加载与保存（5 个组件） |
 | `plugins/src/table/` | 数据处理：选列改列、过滤排序、缺失值、值计数（11 个组件） |
 | `plugins/src/split/` | 数据划分：切训练/测试集、按列拆特征 X 与目标 Y（2 个组件） |
-| `plugins/src/ml/` | 机器学习：5 个回归模型 + 回归评估（依赖 scikit-learn） |
+| `plugins/src/ml/` | 机器学习：5 个回归模型、回归评估、模型保存与加载（依赖 scikit-learn、joblib） |
 | `plugins/src/core/` | 模型应用：`PredictModel`，接任何符合 `std_1.0@model` 的模型 |
 | `studio/` | 本地 Web 后端（标准库 `ThreadingHTTPServer`）+ 前端构建产物 |
 | `frontend/` | Vite + Vue 3 可视化编辑器源码 |
-| `tools/` | 打包插件、构建前端、查文件负责人 |
+| `tools/` | 打包插件、构建前端 |
 | `tests/` | 测试套件 |
 | `workflows/` | 示例工作流 |
-| `docs/` | 契约文档与文件归属表 |
+| `docs/` | 对外契约文档 |
 
 ## 内置组件
 
@@ -39,17 +39,17 @@
 | `fileio`（pandas、openpyxl） | `LoadCSV` `LoadJSON` `LoadExcel` `SaveCSV` `SaveExcel` |
 | `table`（pandas） | `SelectColumns` `DropColumns` `RenameColumns` `CastColumn` `FilterRows` `SortRows` `HeadRows` `ConcatTables` `FillMissing` `DropMissing` `ValueCounts` |
 | `split`（pandas、numpy） | `SplitTable` `SplitXY` |
-| `ml`（scikit-learn） | `LinearRegression` `Ridge` `Lasso` `RandomForestRegressor` `GradientBoostingRegressor` `EvaluateRegression` |
+| `ml`（scikit-learn、joblib） | `LinearRegression` `Ridge` `Lasso` `RandomForestRegressor` `GradientBoostingRegressor` `EvaluateRegression` `SaveModel` `LoadModel` |
 | `core`（无第三方依赖） | `PredictModel` |
 
 `SplitTable` 输出 `train` 和 `test` 两个端口；`SplitXY` 输出特征表 `x` 和目标表 `y`，分别接预测和评估。`PredictModel` 接任何 `std_1.0@model`，所以模型插件换了也不用改流程。
 
 ## 快速开始
 
-需要 Python 3.12。示例插件依赖 `pandas`、`numpy`、`openpyxl`、`scikit-learn`：
+需要 Python 3.12。示例插件依赖 `pandas`、`numpy`、`openpyxl`、`scikit-learn`、`joblib`：
 
 ```bash
-pip install pandas numpy openpyxl scikit-learn
+pip install pandas numpy openpyxl scikit-learn joblib
 ```
 
 **1. 打包插件**（源码在 `plugins/src/`，打包成 `plugins/*.zip`）

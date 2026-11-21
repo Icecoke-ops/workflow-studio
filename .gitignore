@@ -6,6 +6,7 @@ __pycache__/
 plugins/*.zip
 frontend/dist/
 studio/web/
+dist/
 
 # 前端依赖
 node_modules/

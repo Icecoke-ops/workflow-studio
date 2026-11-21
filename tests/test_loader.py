@@ -72,7 +72,7 @@ def case_real_plugins_load():
 
     ml = load_plugin(ROOT / "plugins" / "ml.zip", set())
     check(ml.name == "ml", f"ml.zip 插件名不对：{ml.name!r}")
-    check(len(ml.components) == 6, f"ml 应有 6 个组件：{ml.components}")
+    check(len(ml.components) == 8, f"ml 应有 8 个组件：{ml.components}")
 
     registry = Registry().load(ROOT / "plugins")
     check(
@@ -84,7 +84,7 @@ def case_real_plugins_load():
         sorted(registry.plugins) == ["core", "fileio", "ml", "split", "std", "table"],
         f"插件集合应含内置 std：{sorted(registry.plugins)}",
     )
-    check(len(registry.components) == 25, f"组件总数应为 25：{len(registry.components)}")
+    check(len(registry.components) == 27, f"组件总数应为 27：{len(registry.components)}")
 
 
 def case_missing_init():
@@ -726,8 +726,8 @@ def case_reload_same_dir():
         sorted(second.plugins) == ["core", "fileio", "ml", "split", "std", "table"],
         f"第二次插件：{sorted(second.plugins)}",
     )
-    check(len(first.components) == 25, f"第一次组件数：{len(first.components)}")
-    check(len(second.components) == 25, f"第二次组件数：{len(second.components)}")
+    check(len(first.components) == 27, f"第一次组件数：{len(first.components)}")
+    check(len(second.components) == 27, f"第二次组件数：{len(second.components)}")
     check(first.types == second.types, "两次加载的类型集合应一致")
     first_cls = first.get_component("fileio", "LoadCSV").cls
     second_cls = second.get_component("fileio", "LoadCSV").cls

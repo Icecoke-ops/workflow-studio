@@ -230,7 +230,7 @@ self.path = expand_env(config["path"])   # "${workspace}/data/x.csv"
 
 | 方法 | 路径 | 响应 |
 |---|---|---|
-| GET | `/api/health` | `{"ok":true,"engine":"0.3.0","plugins":6,"components":25}` |
+| GET | `/api/health` | `{"ok":true,"engine":"0.3.1","plugins":6,"components":27}` |
 | GET | `/api/plugins` | `{"plugins":[{name,version,title,types:[{id,desc}],components:[{name,title,desc,config_schema,input_schema,output_schema}]}]}` |
 | POST | `/api/validate` | 请求 `{"workflow":{...}}` → `{"ok":bool,"errors":[],"warnings":[],"order":[]}` |
 | POST | `/api/run` | 请求同上 → `{"ok":bool,"errors":[],"warnings":[],"order":[],"nodes":[{id,component,ms,outputs:{端口:preview},"error":null}]}` |

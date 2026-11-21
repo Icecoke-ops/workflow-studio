@@ -1,6 +1,7 @@
 """ml 插件声明：sklearn 回归模型与评估。"""
 
 from ml.impl.evaluate import EvaluateRegression
+from ml.impl.persist import LoadModel, SaveModel
 from ml.impl.regressors import (
     GradientBoostingRegressor,
     Lasso,
@@ -19,4 +20,6 @@ COMPONENTS = [
     RandomForestRegressor,
     GradientBoostingRegressor,
     EvaluateRegression,
+    SaveModel,
+    LoadModel,
 ]

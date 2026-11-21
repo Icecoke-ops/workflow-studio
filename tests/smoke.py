@@ -68,7 +68,7 @@ def main():
             sorted(registry.plugins) == ["core", "fileio", "ml", "split", "std", "table"],
             f"插件集合 {sorted(registry.plugins)}",
         )
-        check(len(registry.components) == 25, f"组件数 {len(registry.components)}")
+        check(len(registry.components) == 27, f"组件数 {len(registry.components)}")
         check("std_1.0@model" in registry.types, "标准模型类型已注册")
         check("std_1.0@table" in registry.types, "标准表格类型已注册")
         check("std_1.0@model" in registry.models, "标准模型类型已绑定 PredictorModel")
