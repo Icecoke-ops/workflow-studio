@@ -17,14 +17,6 @@ const fields = computed(() => Object.entries(props.schema || {}))
 const jsonDrafts = reactive({})
 const jsonErrors = reactive({})
 
-function isJsonType(spec) {
-  return spec?.type === 'json' || spec?.type === 'array'
-}
-
-function isNumberType(spec) {
-  return spec?.type === 'integer' || spec?.type === 'number'
-}
-
 function toJsonText(value) {
   if (value === undefined) return ''
   try {
@@ -62,7 +54,9 @@ function resetDrafts() {
   for (const key of Object.keys(jsonDrafts)) delete jsonDrafts[key]
   for (const key of Object.keys(jsonErrors)) delete jsonErrors[key]
   for (const [name, spec] of Object.entries(props.schema || {})) {
-    if (isJsonType(spec)) jsonDrafts[name] = toJsonText(props.config?.[name])
+    if (spec?.type === 'json' || spec?.type === 'array') {
+      jsonDrafts[name] = toJsonText(props.config?.[name])
+    }
   }
 }
 
@@ -158,7 +152,7 @@ function onJsonInput(name, text, spec) {
         </el-select>
 
         <el-input-number
-          v-else-if="isNumberType(spec)"
+          v-else-if="spec.type === 'integer' || spec.type === 'number'"
           :model-value="config[name]"
           :min="spec.min"
           :max="spec.max"

@@ -187,7 +187,7 @@ class SaveCSV(TableIn):
     def invoke(self, data):
         try:
             data.to_csv(self.path, encoding=self.encoding, index=self.index)
-        except OSError as exc:
+        except (OSError, UnicodeError) as exc:
             _fail_write(self.path, exc)
         return {}
 
@@ -227,6 +227,6 @@ class SaveExcel(TableIn):
     def invoke(self, data):
         try:
             data.to_excel(self.path, sheet_name=self.sheet, index=self.index)
-        except OSError as exc:
+        except (OSError, UnicodeError) as exc:
             _fail_write(self.path, exc)
         return {}

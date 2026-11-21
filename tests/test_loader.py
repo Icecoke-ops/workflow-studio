@@ -5,8 +5,10 @@
 直接运行：python tests/test_loader.py
 """
 
+import io
 import sys
 import tempfile
+from contextlib import redirect_stderr
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -127,7 +129,13 @@ def case_root_level_py():
         entries = plugin_files("ldp5")
         entries["stray.py"] = ""
         zip_path = write_zip(tmp, "ldp5.zip", entries)
-        expect_raises(PluginLoadError, lambda: load_plugin(zip_path, set()), "源文件必须放在")
+        expect_raises(
+            PluginLoadError,
+            lambda: load_plugin(zip_path, set()),
+            "必须放在",
+            "ldp5/",
+            "stray.py",
+        )
 
 
 def case_plugin_name_missing():
@@ -295,12 +303,130 @@ def case_installed_requirement_ok():
         check(info.name == "ldp14", "已安装依赖时不应该报错")
 
 
-def case_bad_declared_type_name():
+def case_version_constraint_warning():
     with tempfile.TemporaryDirectory(prefix="engine_loader_test_") as tmp:
-        entries = plugin_files("ldp15")
-        entries["ldp15/components.py"] += '\nPLUGIN_TYPES = {"1bad": "x"}\n'
-        zip_path = write_zip(tmp, "ldp15.zip", entries)
-        expect_raises(PluginLoadError, lambda: load_plugin(zip_path, set()), "类型名")
+        entries = plugin_files("ldp34")
+        entries["ldp34/requirements.txt"] = "pandas>=2.0\n"
+        zip_path = write_zip(tmp, "ldp34.zip", entries)
+        err = io.StringIO()
+        with redirect_stderr(err):
+            info = load_plugin(zip_path, set())
+        text = err.getvalue()
+    check(info.name == "ldp34", "带版本约束但依赖已安装时应能加载")
+    check("只检查是否已安装" in text, f"stderr 缺少版本说明：{text!r}")
+    check("不校验版本" in text, f"stderr 缺少版本说明：{text!r}")
+
+
+def case_importable_package_name_rejected():
+    """标准库和已安装第三方包的名字都会被 import 顶掉，加载期就拒绝。"""
+    for name in ("uuid", "pandas"):
+        with tempfile.TemporaryDirectory(prefix="engine_loader_test_") as tmp:
+            write_zip(tmp, f"{name}.zip", plugin_files(name))
+            exc = expect_raises(
+                PluginLoadError, lambda: Registry().load(tmp), name, "同名"
+            )
+            text = str(exc)
+            check("已安装" in text, f"{name} 的错误信息应说明与已安装模块同名：{text!r}")
+            check("标准库" in text, f"{name} 的错误信息应提到标准库：{text!r}")
+
+
+def case_plugin_own_package_not_conflict():
+    """插件自己挂上 sys.path 后，不能再把自己的包名当成「已安装模块」拒绝。"""
+    with tempfile.TemporaryDirectory(prefix="engine_loader_test_") as tmp:
+        zip_path = write_zip(tmp, "ldp37.zip", plugin_files("ldp37"))
+        load_plugin(zip_path, set())  # 直接加载会顺手把该 zip 挂到 sys.path
+        registry = Registry().load(tmp)
+    check("ldp37" in registry.plugins, f"自身包名不应冲突：{sorted(registry.plugins)}")
+
+
+def case_root_level_bytecode_rejected():
+    """根目录 .pyc 和 .py 一样会污染 import；消息要指出插件目录和具体文件。"""
+    with tempfile.TemporaryDirectory(prefix="engine_loader_test_") as tmp:
+        entries = plugin_files("ldp38")
+        entries["x.pyc"] = b""
+        zip_path = write_zip(tmp, "ldp38.zip", entries)
+        expect_raises(
+            PluginLoadError,
+            lambda: load_plugin(zip_path, set()),
+            "源码/字节码",
+            "ldp38/",
+            "x.pyc",
+        )
+
+
+def case_stdlib_module_rejected_without_breaking_process():
+    """sys.zip 被拒之外，还要保证进程里的真 sys 没被 purge 成残骸。"""
+    import importlib.util
+
+    real_sys = sys.modules.get("sys")
+    with tempfile.TemporaryDirectory(prefix="engine_loader_test_") as tmp:
+        write_zip(tmp, "sys.zip", plugin_files("sys"))
+        expect_raises(
+            PluginLoadError, lambda: Registry().load(tmp), "sys", "同名"
+        )
+
+    check(
+        sys.modules.get("sys") is real_sys,
+        "真 sys 模块被删除或替换了（插件加载先 purge 再检查的老 bug 回归）",
+    )
+    check(
+        hasattr(sys.modules.get("sys"), "path"),
+        "sys 模块变成了缺 path 的残骸",
+    )
+    try:
+        importlib.util.find_spec("workflows")
+    except AttributeError as exc:
+        raise AssertionError(
+            f"find_spec('workflows') 抛 AttributeError，说明 sys 已残：{exc}"
+        ) from None
+
+
+def case_plugin_title_not_string():
+    with tempfile.TemporaryDirectory(prefix="engine_loader_test_") as tmp:
+        source = plugin_source("ldp35").replace(
+            'PLUGIN_TITLE = "测试插件"', "PLUGIN_TITLE = 123"
+        )
+        zip_path = write_zip(
+            tmp,
+            "ldp35.zip",
+            {"ldp35/__init__.py": "", "ldp35/components.py": source},
+        )
+        expect_raises(PluginLoadError, lambda: load_plugin(zip_path, set()), "PLUGIN_TITLE")
+
+
+def case_component_title_not_string():
+    """组件级 title 不是字符串要在加载期拒绝，不能留到 Studio 拼节点时才炸。"""
+    with tempfile.TemporaryDirectory(prefix="engine_loader_test_") as tmp:
+        source = plugin_source("ldp36", attrs="    title = 123")
+        write_zip(
+            tmp,
+            "ldp36.zip",
+            {"ldp36/__init__.py": "", "ldp36/components.py": source},
+        )
+        exc = expect_raises(
+            PluginLoadError, lambda: Registry().load(tmp), "title 必须是字符串"
+        )
+        check(
+            "ldp36.Thing" in str(exc),
+            f"错误信息应指到出问题的组件，实际：{exc}",
+        )
+
+
+def case_component_desc_not_string():
+    with tempfile.TemporaryDirectory(prefix="engine_loader_test_") as tmp:
+        source = plugin_source("ldp37", attrs="    desc = 123")
+        write_zip(
+            tmp,
+            "ldp37.zip",
+            {"ldp37/__init__.py": "", "ldp37/components.py": source},
+        )
+        exc = expect_raises(
+            PluginLoadError, lambda: Registry().load(tmp), "desc 必须是字符串"
+        )
+        check(
+            "ldp37.Thing" in str(exc),
+            f"错误信息应指到出问题的组件，实际：{exc}",
+        )
 
 
 def case_unregistered_output_type():
@@ -312,12 +438,18 @@ def case_unregistered_output_type():
 
 def case_short_type_of_other_plugin_hint():
     with tempfile.TemporaryDirectory(prefix="engine_loader_test_") as tmp:
-        provider = plugin_source("ldp17a", types='{"table": "表"}')
+        provider = plugin_source("ldp17a")
         consumer = plugin_source(
             "ldp17b", class_name="Consumer", input_schema='{"data": {"types": ["table"]}}'
         )
         write_zip(
-            tmp, "ldp17a.zip", {"ldp17a/__init__.py": "", "ldp17a/components.py": provider}
+            tmp,
+            "ldp17a.zip",
+            {
+                "ldp17a/__init__.py": "",
+                "ldp17a/components.py": provider,
+                "ldp17a/types.py": 'TYPES = {"table": "表"}\n',
+            },
         )
         write_zip(
             tmp, "ldp17b.zip", {"ldp17b/__init__.py": "", "ldp17b/components.py": consumer}
@@ -468,7 +600,6 @@ def case_predictor_model_contract():
 
 _TPA_SOURCE = plugin_source(
     "tpa",
-    types='{"dataset": "数据集"}',
     class_name="Producer",
     output_schema='{"data": {"type": "dataset"}}',
 )
@@ -484,7 +615,13 @@ def case_cross_plugin_type():
     """A 插件定义类型，B 插件写全名就能接，不需要 import 任何代码。"""
     with tempfile.TemporaryDirectory(prefix="engine_loader_test_") as tmp:
         write_zip(
-            tmp, "tpa.zip", {"tpa/__init__.py": "", "tpa/components.py": _TPA_SOURCE}
+            tmp,
+            "tpa.zip",
+            {
+                "tpa/__init__.py": "",
+                "tpa/components.py": _TPA_SOURCE,
+                "tpa/types.py": 'TYPES = {"dataset": "数据集"}\n',
+            },
         )
         write_zip(
             tmp, "tpb.zip", {"tpb/__init__.py": "", "tpb/components.py": _TPB_SOURCE}
@@ -600,13 +737,14 @@ def case_reload_same_dir():
     )
 
 
-def _temp_plugin_source(package, title, component_title, types_literal):
-    return plugin_source(
-        package,
-        title=title,
-        types=types_literal,
-        attrs=f'    title = "{component_title}"',
-    )
+def _temp_plugin_files(package, title, component_title, types_literal):
+    return {
+        f"{package}/__init__.py": "",
+        f"{package}/components.py": plugin_source(
+            package, title=title, attrs=f'    title = "{component_title}"'
+        ),
+        f"{package}/types.py": f"TYPES = {types_literal}\n",
+    }
 
 
 def case_reload_other_dir_same_package():
@@ -620,22 +758,12 @@ def case_reload_other_dir_same_package():
         write_zip(
             dir_a,
             "pz1.zip",
-            {
-                "pz1/__init__.py": "",
-                "pz1/components.py": _temp_plugin_source(
-                    "pz1", "A 插件", "A 组件", '{"table": "A 的表"}'
-                ),
-            },
+            _temp_plugin_files("pz1", "A 插件", "A 组件", '{"table": "A 的表"}'),
         )
         write_zip(
             dir_b,
             "pz1.zip",
-            {
-                "pz1/__init__.py": "",
-                "pz1/components.py": _temp_plugin_source(
-                    "pz1", "B 插件", "B 组件", '{"model": "B 的模型"}'
-                ),
-            },
+            _temp_plugin_files("pz1", "B 插件", "B 组件", '{"model": "B 的模型"}'),
         )
 
         first = Registry().load(dir_a)
@@ -689,12 +817,7 @@ def case_reload_modified_zip():
         write_zip(
             tmp,
             "pz2.zip",
-            {
-                "pz2/__init__.py": "",
-                "pz2/components.py": _temp_plugin_source(
-                    "pz2", "v1", "旧组件", '{"table": "v1"}'
-                ),
-            },
+            _temp_plugin_files("pz2", "v1", "旧组件", '{"table": "v1"}'),
         )
         first = Registry().load(tmp)
         check(
@@ -705,12 +828,7 @@ def case_reload_modified_zip():
         write_zip(
             tmp,
             "pz2.zip",
-            {
-                "pz2/__init__.py": "",
-                "pz2/components.py": _temp_plugin_source(
-                    "pz2", "v2", "新组件", '{"table": "v2"}'
-                ),
-            },
+            _temp_plugin_files("pz2", "v2", "新组件", '{"table": "v2"}'),
         )
         second = Registry().load(tmp)
         check(
@@ -797,7 +915,14 @@ CASES = [
     ("多目录：不同目录同名插件报重复", case_duplicate_plugin_across_dirs),
     ("依赖缺失报错含包名和 pip 提示", case_missing_requirement),
     ("依赖已安装时正常加载", case_installed_requirement_ok),
-    ("PLUGIN_TYPES 类型名非法报错", case_bad_declared_type_name),
+    ("requirements 带版本约束时加载成功并警告", case_version_constraint_warning),
+    ("插件名与可导入模块（标准库/第三方包）同名被拒", case_importable_package_name_rejected),
+    ("插件自身包名不算冲突", case_plugin_own_package_not_conflict),
+    ("根目录字节码被拒", case_root_level_bytecode_rejected),
+    ("内置模块 sys 被拒且进程不被破坏", case_stdlib_module_rejected_without_breaking_process),
+    ("插件 title 必须是字符串", case_plugin_title_not_string),
+    ("组件 title 必须是字符串", case_component_title_not_string),
+    ("组件 desc 必须是字符串", case_component_desc_not_string),
     ("输出类型未注册报错", case_unregistered_output_type),
     ("跨插件短名未注册并给出提示", case_short_type_of_other_plugin_hint),
     ("types.py 内部 import 错误报 PluginLoadError", case_types_py_broken_import),

@@ -7,7 +7,10 @@ from table.impl.checks import parse_json_value, require_columns
 class FillMissing(TableIn):
     name = "FillMissing"
     title = "填充缺失值"
-    desc = "按均值 / 中位数 / 众数 / 常量填充空值"
+    desc = (
+        "按均值 / 中位数 / 众数 / 常量填充空值；接上参考表时统计量取自它（例如训练集），"
+        "不接时统计量在当前表上计算——建模请把训练集接到 reference，否则测试集会参与统计"
+    )
 
     @staticmethod
     def config_schema():
@@ -38,6 +41,18 @@ class FillMissing(TableIn):
         }
 
     @staticmethod
+    def input_schema():
+        return {
+            "data": {"types": ["std_1.0@table"], "required": True, "title": "数据表"},
+            "reference": {
+                "types": ["std_1.0@table"],
+                "required": False,
+                "title": "参考表",
+                "desc": "统计量取自这张表（例如训练集）；不接则用 data 自己算",
+            },
+        }
+
+    @staticmethod
     def output_schema():
         return {"table": {"type": "std_1.0@table", "title": "结果表"}}
 
@@ -47,7 +62,7 @@ class FillMissing(TableIn):
         text = config.get("value")
         self.value = None if text is None else parse_json_value(text)
 
-    def invoke(self, data):
+    def invoke(self, data, reference=None):
         import pandas as pd
 
         targets = self.columns or list(data.columns)
@@ -56,28 +71,35 @@ class FillMissing(TableIn):
             self.value is None or isinstance(self.value, (dict, list))
         ):
             raise ValueError("strategy=constant 需要用 value 给出标量")
+        source = data if reference is None else reference
+        if self.strategy != "constant" and reference is not None:
+            missing = [column for column in targets if column not in source.columns]
+            if missing:
+                raise ValueError(
+                    f"参考表缺少列：{missing}（参考表可用：{list(source.columns)}）"
+                )
         result = data.copy()
         for column in targets:
-            series = result[column]
+            filled = result[column]
             if self.strategy == "constant":
-                result[column] = series.fillna(self.value)
+                result[column] = filled.fillna(self.value)
                 continue
+            stats = source[column]
             if self.strategy in ("mean", "median"):
-                if not pd.api.types.is_numeric_dtype(series):
+                if not pd.api.types.is_numeric_dtype(stats):
                     raise ValueError(
                         f"列 {column} 不是数值列，不能用 {self.strategy} 填充"
                     )
-            # ponytail: 统计量在整表上算，训练/测试严格隔离需要预处理器类型，等真有需求再升级
             if self.strategy == "mean":
-                fill = series.mean()
+                fill = stats.mean()
             elif self.strategy == "median":
-                fill = series.median()
+                fill = stats.median()
             else:
-                modes = series.mode(dropna=True)
+                modes = stats.mode(dropna=True)
                 if modes.empty:
                     continue
                 fill = modes.iloc[0]
-            result[column] = series.fillna(fill)
+            result[column] = filled.fillna(fill)
         return {"table": result}
 
 

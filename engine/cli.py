@@ -2,9 +2,7 @@
 
 import argparse
 import os
-import secrets
 import sys
-import time
 from pathlib import Path
 
 from . import __version__
@@ -64,8 +62,7 @@ def _run_report(registry, args, cli_env):
         return 0
 
     print(f"[开始执行] {title}，{len(report.workflow.nodes)} 个节点")
-    os.environ.update(report.workflow.env)
-    os.environ.update(cli_env)
+    env_mod.apply(report.workflow.env, cli_env)
     try:
         results = run(report.workflow, registry)
     except WorkflowError as exc:
@@ -110,7 +107,7 @@ def _add_env(parser, default):
         action="append",
         default=default,
         metavar="KEY=VALUE",
-        help="设置环境变量，可重复指定；在工作流 env 之后覆盖",
+        help="设置环境变量，可重复指定；在工作流 env 之后覆盖，仅 run 子命令生效",
     )
 
 
@@ -125,16 +122,21 @@ def main(argv=None):
     _add_env(parser, [])
     sub = parser.add_subparsers(dest="command", required=True)
     plugins_parser = sub.add_parser("plugins", help="列出已加载的插件、组件和类型")
-    _add_plugins_dir(plugins_parser, argparse.SUPPRESS)
     validate_parser = sub.add_parser("validate", help="只校验工作流，不执行")
     validate_parser.add_argument("file", help="工作流 JSON 文件")
-    _add_plugins_dir(validate_parser, argparse.SUPPRESS)
     run_parser = sub.add_parser("run", help="校验并执行工作流")
     run_parser.add_argument("file", help="工作流 JSON 文件")
-    _add_plugins_dir(run_parser, argparse.SUPPRESS)
-    _add_env(run_parser, argparse.SUPPRESS)
+    for p in (plugins_parser, validate_parser, run_parser):
+        _add_plugins_dir(p, argparse.SUPPRESS)
+        _add_env(p, argparse.SUPPRESS)
 
+    opt = argparse.ArgumentParser(add_help=False)
+    _add_plugins_dir(opt, None)
+    _add_env(opt, None)
+    opts, _ = opt.parse_known_args(argv)
     args = parser.parse_args(argv)
+    args.plugins_dir = opts.plugins_dir or []
+    args.env = opts.env or []
 
     try:
         cli_env = env_mod.parse_pairs(args.env)
@@ -145,7 +147,7 @@ def main(argv=None):
     startup_env = {
         "workspace": os.getcwd(),
         "engine_version": __version__,
-        "run_id": f"{time.strftime('%Y%m%d%H%M%S')}{secrets.token_hex(2)}",
+        "run_id": env_mod.new_run_id(),
     }
     if getattr(args, "file", None):
         startup_env["workflow"] = str(Path(args.file).resolve())

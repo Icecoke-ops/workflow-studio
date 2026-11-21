@@ -13,43 +13,19 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from engine.registry import Registry
-from engine.runner import run
-from engine.workflow import validate
-
-from _harness import check, expect_raises, invoke, run_cases, source_node
-
-
-_REGISTRY = None
-
-
-def get_registry():
-    global _REGISTRY
-    if _REGISTRY is None:
-        _REGISTRY = Registry().load(ROOT / "plugins")
-    return _REGISTRY
+from _harness import (
+    check,
+    expect_raises,
+    get_registry,
+    invoke,
+    node,
+    run_cases,
+    run_workflow,
+    source_node,
+)
 
 
-def node(node_id, plugin, component, config=None, inputs=None):
-    return {
-        "id": node_id,
-        "plugin": plugin,
-        "component": component,
-        "config": {} if config is None else config,
-        "inputs": {} if inputs is None else inputs,
-    }
-
-
-def run_workflow(raw):
-    registry = get_registry()
-    report = validate(registry, raw)
-    check(report.ok, f"工作流应校验通过，实际错误：{report.errors}")
-    return run(report.workflow, registry)
-
-
-# --------------------------------------------------------------------------
-# SplitTable
-# --------------------------------------------------------------------------
+# ---- SplitTable ----
 
 def case_split_table_proportion_and_seed():
     data = pd.DataFrame({"v": list(range(100))})
@@ -93,14 +69,22 @@ def case_split_table_both_outputs_consumed():
                 ),
             ],
         }
-        results = run_workflow(raw)
+        results = run_workflow(get_registry(), raw)
     check(len(results["n3"].outputs["table"]) == 2, "train 端口应被下游成功消费")
     check(len(results["n4"].outputs["table"]) == 1, "test 端口应被下游成功消费")
 
 
-# --------------------------------------------------------------------------
-# SplitXY
-# --------------------------------------------------------------------------
+def case_split_table_bad_test_size():
+    """test_size 边界在构造期就报错，不要等到 invoke 拿到数据才报。"""
+    from engine.schema import fill_defaults
+
+    entry = get_registry().get_component("split", "SplitTable")
+    for bad in (0, 1):
+        config = fill_defaults(entry.config_schema, {"test_size": bad})
+        expect_raises(ValueError, lambda c=config: entry.cls(c), "test_size")
+
+
+# ---- SplitXY ----
 
 def _xy_frame():
     return pd.DataFrame({"x": [1, 2, 3], "z": [4, 5, 6], "y": [7, 8, 9]})
@@ -171,6 +155,7 @@ def case_split_xy_target_in_feature():
 
 CASES = [
     ("SplitTable 比例正确且 seed 可复现", case_split_table_proportion_and_seed),
+    ("SplitTable test_size 边界在构造期报错", case_split_table_bad_test_size),
     ("SplitTable 两个输出端口都被下游消费", case_split_table_both_outputs_consumed),
     ("SplitXY 输出列名与行数正确", case_split_xy_columns_and_rows),
     ("SplitXY x / y 行对行一一对应", case_split_xy_rows_correspond),

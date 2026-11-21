@@ -1,11 +1,4 @@
-// 前端与 studio/server.py 的 HTTP 客户端。
-// 契约见 docs/CONTRACT.md 第 6 节，这里是唯一事实来源，不要按实现反推。
-//
-//   GET  /api/health   -> {ok, engine, plugins, components}
-//   GET  /api/plugins  -> {plugins:[{name, version, title, types:[{id,desc}], components:[...]}]}
-//   POST /api/validate -> {"workflow": {...}} -> {ok, errors, warnings, order}
-//   POST /api/run      -> {"workflow": {...}} -> {ok, errors, warnings, order,
-//                                                 nodes:[{id, component, ms, outputs:{端口:preview}, error}]}
+// 前端调 studio/server.py 的 HTTP 客户端；接口契约见 docs/CONTRACT.md 第 6 节。
 
 const BASE = '/api'
 
@@ -36,7 +29,7 @@ async function request(path, options = {}) {
 }
 
 /** ``std_1.0@table`` -> ``std@table``（与 engine.registry.short_type 一致）。 */
-export function shortType(typeId) {
+function shortType(typeId) {
   if (!typeId) return '?'
   const text = String(typeId)
   const at = text.indexOf('@')
@@ -47,7 +40,7 @@ export function shortType(typeId) {
   return `${cut > 0 ? head.slice(0, cut) : head}@${name}`
 }
 
-export function normalizePlugins(data) {
+function normalizePlugins(data) {
   const typeLabels = {}
   const typeDescs = {}
 

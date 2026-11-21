@@ -45,6 +45,8 @@ class SplitTable(TableIn):
         self.test_size = config["test_size"]
         self.seed = config.get("seed")
         self.shuffle = config["shuffle"]
+        if not 0 < self.test_size < 1:
+            raise ValueError(f"test_size 必须在 (0, 1) 之间，实际 {self.test_size}")
 
     def invoke(self, data):
         import numpy as np
@@ -52,8 +54,6 @@ class SplitTable(TableIn):
         total = len(data)
         if total < 2:
             raise ValueError(f"数据只有 {total} 行，无法切分")
-        if not 0 < self.test_size < 1:
-            raise ValueError(f"test_size 必须在 (0, 1) 之间，实际 {self.test_size}")
         positions = np.arange(total)
         if self.shuffle:
             np.random.default_rng(self.seed).shuffle(positions)

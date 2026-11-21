@@ -13,19 +13,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from engine.registry import Registry
-
-from _harness import check, expect_raises, invoke, run_cases
-
-
-_REGISTRY = None
-
-
-def get_registry():
-    global _REGISTRY
-    if _REGISTRY is None:
-        _REGISTRY = Registry().load(ROOT / "plugins")
-    return _REGISTRY
+from _harness import check, expect_raises, get_registry, invoke, run_cases
 
 
 def table(plugin, name, config=None, **inputs):
@@ -36,9 +24,7 @@ def _abc_frame():
     return pd.DataFrame({"a": [1, 2], "b": [3, 4], "c": [5, 6]})
 
 
-# --------------------------------------------------------------------------
-# SelectColumns
-# --------------------------------------------------------------------------
+# ---- SelectColumns ----
 
 def case_select_columns_array():
     result = table(
@@ -68,9 +54,16 @@ def case_select_columns_strict_off():
     check(list(result.columns) == ["a"], f"缺列应被跳过：{list(result.columns)}")
 
 
-# --------------------------------------------------------------------------
-# CastColumn
-# --------------------------------------------------------------------------
+def case_select_columns_duplicate():
+    """重复列名在构造期就报错，不要等到 invoke 才发现。"""
+    from engine.schema import fill_defaults
+
+    entry = get_registry().get_component("table", "SelectColumns")
+    config = fill_defaults(entry.config_schema, {"columns": ["x", "x"]})
+    expect_raises(ValueError, lambda: entry.cls(config), "重复列名", "x")
+
+
+# ---- CastColumn ----
 
 def case_cast_column_bool_zero():
     """astype(bool) 会把 "0" 当成 True，这里守住按字面量转换。"""
@@ -85,9 +78,39 @@ def case_cast_column_bool_zero():
     )
 
 
-# --------------------------------------------------------------------------
-# FilterRows：十种 op
-# --------------------------------------------------------------------------
+def case_cast_column_numeric_bool():
+    data = pd.DataFrame({"flag": [1.0, 0.0, np.nan]})
+    result = table(
+        "table", "CastColumn", {"column": "flag", "to": "bool"}, data=data
+    )
+    values = list(result["flag"])
+    check(bool(values[0]) is True, f"1.0 应转成 True，实际 {values[0]!r}")
+    check(bool(values[1]) is False, f"0.0 应转成 False，实际 {values[1]!r}")
+    check(pd.isna(values[2]), f"缺失值应保持 NA，实际 {values[2]!r}")
+
+    ints = pd.DataFrame({"flag": [1, 0]})
+    result_int = table(
+        "table", "CastColumn", {"column": "flag", "to": "bool"}, data=ints
+    )
+    check(
+        [bool(value) for value in result_int["flag"]] == [True, False],
+        f"整数列 1/0 应照旧转换：{result_int['flag'].tolist()}",
+    )
+
+
+def case_cast_column_numeric_bool_invalid():
+    data = pd.DataFrame({"flag": [1.0, 2.0]})
+    expect_raises(
+        ValueError,
+        lambda: table(
+            "table", "CastColumn", {"column": "flag", "to": "bool"}, data=data
+        ),
+        "无法转成布尔",
+        "2.0",
+    )
+
+
+# ---- FilterRows：十种 op ----
 
 def _filter_frame():
     return pd.DataFrame({"n": [1.0, 2.0, 3.0, np.nan], "s": ["abc", "bcd", "xyz", np.nan]})
@@ -150,9 +173,35 @@ def case_filter_isnull():
     check(len(result) == 1, f"isnull 应保留 1 行：{len(result)}")
 
 
-# --------------------------------------------------------------------------
-# FillMissing
-# --------------------------------------------------------------------------
+def case_filter_string_column_with_number_error():
+    """裸数字被解析成 int；字符串列拿它比较要给出可读错误，
+    不能把 pandas 的 "'>' not supported" 原样透出来。"""
+    exc = expect_raises(
+        ValueError,
+        lambda: _filtered("s", "eq", "3"),
+        "字符串列",
+        "不能与数字",
+    )
+    text = str(exc)
+    check("s" in text, f"错误信息应指出列名：{text!r}")
+    check(">" not in text, f"错误信息不应透出 pandas 的 '>' 提示：{text!r}")
+
+
+def case_filter_string_column_with_quoted_number():
+    data = pd.DataFrame({"s": ["3", "abc"]})
+    result = table(
+        "table",
+        "FilterRows",
+        {"column": "s", "op": "eq", "value": '"3"'},
+        data=data,
+    )
+    check(
+        list(result["s"]) == ["3"],
+        f'带引号的 "3" 应按字符串命中：{result["s"].tolist()}',
+    )
+
+
+# ---- FillMissing ----
 
 def _missing_num_frame():
     return pd.DataFrame({"v": [1.0, np.nan, 3.0]})
@@ -211,9 +260,194 @@ def case_fill_missing_mean_text_column():
     )
 
 
-# --------------------------------------------------------------------------
-# DropMissing
-# --------------------------------------------------------------------------
+def _filtered_on(data, column, op, value=None):
+    config = {"column": column, "op": op}
+    if value is not None:
+        config["value"] = value
+    return table("table", "FilterRows", config, data=data)
+
+
+def _datetime_frame():
+    return pd.DataFrame({"d": pd.to_datetime(["2024-01-01", "2024-02-01"])})
+
+
+def case_filter_datetime_in_matches():
+    """旧版 datetime 列 op=in 会静默返回 0 行，这条守住能命中。"""
+    result = _filtered_on(_datetime_frame(), "d", "in", '["2024-01-01"]')
+    check(
+        list(result["d"]) == [pd.Timestamp("2024-01-01")],
+        f"datetime 列 in 日期串应命中 1 行：{result['d'].tolist()}",
+    )
+
+
+def case_filter_datetime_in_number_rejected():
+    expect_raises(
+        ValueError,
+        lambda: _filtered_on(_datetime_frame(), "d", "in", "[1, 2]"),
+        "日期时间列",
+        "不能有数字",
+    )
+
+
+def case_filter_datetime_in_empty_array():
+    result = _filtered_on(_datetime_frame(), "d", "in", "[]")
+    check(len(result) == 0, f"in [] 应返回 0 行且不报错：{len(result)}")
+
+
+def case_filter_datetime_in_none_does_not_match_nat():
+    """[null] 必须在 to_datetime 前过滤掉，否则会生成 NaT 并匹配缺失行。"""
+    data = pd.DataFrame({"d": pd.to_datetime(["2024-01-01", None])})
+    result = _filtered_on(data, "d", "in", "[null]")
+    check(
+        len(result) == 0,
+        f"in [null] 不应命中任何行（包括 NaT）：{result['d'].tolist()}",
+    )
+
+
+def case_filter_datetime_naive_with_offset_rejected():
+    """无时区列拿带偏移的串比较，pandas 会静默全 False；必须提前报错。"""
+    expect_raises(
+        ValueError,
+        lambda: _filtered_on(_datetime_frame(), "d", "eq", "2024-01-01T00:00:00+08:00"),
+        "无时区",
+        "时区",
+    )
+
+
+def case_filter_datetime_invalid_date_rejected():
+    expect_raises(
+        ValueError,
+        lambda: _filtered_on(_datetime_frame(), "d", "eq", "2024-13-01"),
+        "日期值不合法",
+        "2024-13-01",
+    )
+
+
+def case_filter_datetime_aware_with_naive_string_matches():
+    """带时区列 + 无时区串是 pandas 能命中的一向，只拦会静默返回 False 的反向。"""
+    data = pd.DataFrame(
+        {"d": pd.to_datetime(["2024-01-01", "2024-02-01"]).tz_localize("Asia/Shanghai")}
+    )
+    result = _filtered_on(data, "d", "eq", "2024-01-01")
+    check(len(result) == 1, f"带时区列与无时区日期串应命中 1 行：{len(result)}")
+    check(
+        result["d"].iloc[0] == pd.Timestamp("2024-01-01", tz="Asia/Shanghai"),
+        f"命中的行不对：{result['d'].tolist()}",
+    )
+
+
+def case_fill_missing_no_reference_uses_data():
+    """不接 reference：统计量必须取自 data 自己（reference 是可选输入）。"""
+    data = pd.DataFrame({"a": [1.0, np.nan, 3.0]})
+    result = table(
+        "table", "FillMissing", {"columns": ["a"], "strategy": "mean"}, data=data
+    )
+    check(data["a"].mean() == 2.0, f"数据表自身均值应为 2.0：{data['a'].mean()}")
+    check(
+        list(result["a"]) == [1.0, 2.0, 3.0],
+        f"不接 reference 应填当前表的均值 2.0：{result['a'].tolist()}",
+    )
+
+
+def case_fill_missing_reference_mean():
+    data = pd.DataFrame({"a": [1.0, np.nan, 3.0]})  # 自身均值 2.0
+    reference = pd.DataFrame({"a": [10.0, 20.0]})  # 参考表均值 15.0
+    result = table(
+        "table",
+        "FillMissing",
+        {"columns": ["a"], "strategy": "mean"},
+        data=data,
+        reference=reference,
+    )
+    check(
+        list(result["a"]) == [1.0, 15.0, 3.0],
+        f"应填参考表的均值 15.0，而不是 data 的 2.0：{result['a'].tolist()}",
+    )
+
+
+def case_fill_missing_reference_median():
+    data = pd.DataFrame({"a": [1.0, np.nan, 3.0]})  # 自身中位数 2.0
+    reference = pd.DataFrame({"a": [10.0, 20.0, 21.0]})  # 参考表中位数 20.0 / 均值 17.0
+    result = table(
+        "table",
+        "FillMissing",
+        {"columns": ["a"], "strategy": "median"},
+        data=data,
+        reference=reference,
+    )
+    check(
+        reference["a"].mean() != 20.0,
+        f"参考表均值应与中位数不同，才能证明用的是 median：{reference['a'].mean()}",
+    )
+    check(
+        list(result["a"]) == [1.0, 20.0, 3.0],
+        f"应填参考表的中位数 20.0：{result['a'].tolist()}",
+    )
+
+
+def case_fill_missing_reference_mode():
+    data = pd.DataFrame({"a": [1.0, 1.0, np.nan]})  # 自身众数 1.0
+    reference = pd.DataFrame({"a": [10.0, 10.0, 20.0]})  # 参考表众数 10.0
+    result = table(
+        "table",
+        "FillMissing",
+        {"columns": ["a"], "strategy": "mode"},
+        data=data,
+        reference=reference,
+    )
+    check(
+        list(result["a"]) == [1.0, 1.0, 10.0],
+        f"应填参考表的众数 10.0，而不是 data 的 1.0：{result['a'].tolist()}",
+    )
+
+
+def case_fill_missing_reference_missing_column():
+    data = pd.DataFrame({"a": [1.0, np.nan]})
+    reference = pd.DataFrame({"b": [10.0, 20.0]})
+    expect_raises(
+        ValueError,
+        lambda: table(
+            "table",
+            "FillMissing",
+            {"columns": ["a"], "strategy": "mean"},
+            data=data,
+            reference=reference,
+        ),
+        "参考表缺少列",
+        "['a']",
+        "参考表可用",
+        "['b']",
+    )
+
+
+def case_fill_missing_constant_ignores_reference():
+    """constant 不需要参考表，参考表缺列也不该报错。"""
+    data = pd.DataFrame({"a": [1.0, np.nan]})
+    reference = pd.DataFrame({"b": [9.0]})
+    result = table(
+        "table",
+        "FillMissing",
+        {"columns": ["a"], "strategy": "constant", "value": "0"},
+        data=data,
+        reference=reference,
+    )
+    check(
+        list(result["a"]) == [1.0, 0.0],
+        f"constant 应照常量填 0.0，不受参考表列影响：{result['a'].tolist()}",
+    )
+
+
+def case_fill_missing_reference_port_optional():
+    entry = get_registry().get_component("table", "FillMissing")
+    spec = entry.input_schema["reference"]
+    check(spec.get("required") is False, f"reference 必须是可选输入：{spec!r}")
+    check(
+        "std_1.0@table" in spec["types"],
+        f"reference 类型必须是 std_1.0@table：{spec.get('types')!r}",
+    )
+
+
+# ---- DropMissing ----
 
 def case_drop_missing_any_vs_all():
     data = pd.DataFrame(
@@ -227,9 +461,7 @@ def case_drop_missing_any_vs_all():
     check(all_out.notna().any().all(), "how=all 不应删掉部分缺失的行")
 
 
-# --------------------------------------------------------------------------
-# 其余行/列/探查组件
-# --------------------------------------------------------------------------
+# ---- 其余行/列/探查组件 ----
 
 def case_concat_tables():
     first = pd.DataFrame({"a": [1, 2]})
@@ -277,7 +509,10 @@ CASES = [
     ("SelectColumns array 写法与顺序", case_select_columns_array),
     ("SelectColumns strict 缺列报错", case_select_columns_strict_error),
     ("SelectColumns strict 关闭时跳过缺列", case_select_columns_strict_off),
+    ("SelectColumns 重复列在构造期报错", case_select_columns_duplicate),
     ('CastColumn to=bool 时 "0" 转 False', case_cast_column_bool_zero),
+    ("CastColumn 数值列 1/0 转 bool，缺失保持 NA", case_cast_column_numeric_bool),
+    ("CastColumn 数值列出现其他值时报错带真实值", case_cast_column_numeric_bool_invalid),
     ("FilterRows eq", case_filter_eq),
     ("FilterRows ne", case_filter_ne),
     ("FilterRows gt", case_filter_gt),
@@ -288,11 +523,27 @@ CASES = [
     ("FilterRows contains", case_filter_contains),
     ("FilterRows notnull", case_filter_notnull),
     ("FilterRows isnull", case_filter_isnull),
+    ("FilterRows 字符串列拿数字比较给出可读错误", case_filter_string_column_with_number_error),
+    ("FilterRows 字符串列带引号数字正常命中", case_filter_string_column_with_quoted_number),
+    ("FilterRows datetime 列 in 日期串命中", case_filter_datetime_in_matches),
+    ("FilterRows datetime 列 in 数字报错", case_filter_datetime_in_number_rejected),
+    ("FilterRows datetime 列 in 空数组返回 0 行", case_filter_datetime_in_empty_array),
+    ("FilterRows datetime 列 in [null] 不命中 NaT", case_filter_datetime_in_none_does_not_match_nat),
+    ("FilterRows 无时区列带偏移串报错", case_filter_datetime_naive_with_offset_rejected),
+    ("FilterRows 非法日期串报错", case_filter_datetime_invalid_date_rejected),
+    ("FilterRows 带时区列与无时区串命中", case_filter_datetime_aware_with_naive_string_matches),
     ("FillMissing mean", case_fill_missing_mean),
     ("FillMissing median", case_fill_missing_median),
     ("FillMissing mode", case_fill_missing_mode),
     ("FillMissing constant", case_fill_missing_constant),
     ("FillMissing 文本列用 mean 报错并指列名", case_fill_missing_mean_text_column),
+    ("FillMissing 不接 reference 用当前表统计量", case_fill_missing_no_reference_uses_data),
+    ("FillMissing reference mean 取参考表", case_fill_missing_reference_mean),
+    ("FillMissing reference median 取参考表", case_fill_missing_reference_median),
+    ("FillMissing reference mode 取参考表", case_fill_missing_reference_mode),
+    ("FillMissing 参考表缺目标列报错", case_fill_missing_reference_missing_column),
+    ("FillMissing constant 不需要参考表", case_fill_missing_constant_ignores_reference),
+    ("FillMissing reference 是可选输入", case_fill_missing_reference_port_optional),
     ("DropMissing any / all 语义差异", case_drop_missing_any_vs_all),
     ("ConcatTables 纵向拼接", case_concat_tables),
     ("SortRows 排序", case_sort_rows),

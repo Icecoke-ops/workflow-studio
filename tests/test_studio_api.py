@@ -1,6 +1,6 @@
 """P2 自检：同一进程里起 StudioServer，用 urllib 打五个接口并断言。
 
-    python tests/studio_api.py
+    python tests/test_studio_api.py
 
 插件临时打到系统临时目录，跑完清理，不往仓库里丢东西。
 """
@@ -287,6 +287,7 @@ def main():
 
         def spy_run(workflow_obj, registry, on_node_done=None):
             seen.append(os.environ.get("STUDIO_ENV_TEST"))
+            check(re.fullmatch(r"\d{8}-\d{6}-[0-9a-f]{4}", os.environ.get("run_id") or ""), f"Studio run_id 格式正确：{os.environ.get('run_id')!r}")
             return original_run(workflow_obj, registry, on_node_done)
 
         server_module.run = spy_run
@@ -413,6 +414,71 @@ def main():
             except OSError:
                 time.sleep(0.1)
         check(released, f"端口 {port} 已释放")
+
+        # 13) 安全：非回环 host 没有 --allow-remote 时拒绝启动
+        result = subprocess.run(
+            [sys.executable, "-m", "studio", "--host", "0.0.0.0", "--port", str(free_port())],
+            cwd=str(ROOT),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=15,
+        )
+        check(
+            result.returncode != 0,
+            f"0.0.0.0 缺 --allow-remote 启动失败（exit {result.returncode}）",
+        )
+
+        # 14) 安全：内部异常不把本机路径/异常原文回给客户端
+        original_health = service.health
+
+        def boom():
+            raise RuntimeError("boom at C:\\temp\\secret\\file.txt")
+
+        service.health = boom
+        try:
+            status, _, body = api.json("/api/health")
+        finally:
+            service.health = original_health
+        raw_body = json.dumps(body, ensure_ascii=False)
+        check(status == 500, f"内部异常返回 500（{status}）")
+        check(
+            body == {"ok": False, "errors": ["服务器内部错误"]},
+            f"内部异常响应体 {body}",
+        )
+        check(
+            "secret" not in raw_body and "boom" not in raw_body and "temp" not in raw_body,
+            "响应体不含本机路径或异常原文",
+        )
+
+        # 15) 契约：载荷违反契约时回具体字段消息，不压平成通用错误
+        original_health = service.health
+
+        def broken_health():
+            return {"ok": True}
+
+        service.health = broken_health
+        try:
+            status, _, body = api.json("/api/health")
+        finally:
+            service.health = original_health
+        raw_body = json.dumps(body, ensure_ascii=False)
+        check(status == 500 and body["ok"] is False, f"契约违规返回 500 + ok:false（{status}）")
+        check(
+            body["errors"] == ["health.engine 必须是字符串"],
+            f"契约违规回具体字段消息：{body['errors']}",
+        )
+        check(
+            "health" in body["errors"][0]
+            and "engine" in body["errors"][0]
+            and "服务器内部错误" not in raw_body,
+            "错误消息含 health.engine 且不是通用内部错误",
+        )
+        check(
+            "ContractError" not in raw_body
+            and "Traceback" not in raw_body
+            and "contract.py" not in raw_body,
+            "响应体不含异常类名或栈信息",
+        )
 
         print("\nALL OK")
         return 0

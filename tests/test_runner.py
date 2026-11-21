@@ -30,7 +30,6 @@ from engine.api import Component, PredictorModel
 PLUGIN_NAME = "rnp1"
 PLUGIN_VERSION = "1.0"
 PLUGIN_TITLE = "runner 测试"
-PLUGIN_TYPES = {"num": "数字"}
 
 
 class Echo(Component):
@@ -288,6 +287,7 @@ def get_registry():
         with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as archive:
             archive.writestr("rnp1/__init__.py", "")
             archive.writestr("rnp1/components.py", _RUNNER_SOURCE)
+            archive.writestr("rnp1/types.py", 'TYPES = {"num": "数字"}\n')
         _REGISTRY = Registry().load(_TEMP_DIR.name)
     return _REGISTRY
 

@@ -14,7 +14,7 @@ if str(ROOT) not in sys.path:
 from engine.api import expand_env
 from engine.env import parse_pairs, restore, snapshot
 
-from _harness import check, env_guard, expect_raises, run_cases
+from _harness import RUN_ID_RE, check, env_guard, expect_raises, run_cases
 
 
 def case_parse_pairs_split_on_first_equals():
@@ -95,6 +95,19 @@ def case_expand_env_non_string():
     check(expand_env(123) == 123, "非字符串应原样返回")
 
 
+def case_new_run_id_format():
+    from engine.env import new_run_id
+
+    ids = [new_run_id() for _ in range(3)]
+    for value in ids:
+        check(isinstance(value, str), f"run_id 必须是字符串：{value!r}")
+        check(
+            RUN_ID_RE.match(value),
+            f"run_id 格式应为 YYYYmmdd-HHMMSS-xxxx，实际 {value!r}",
+        )
+    check(len(set(ids)) == 3, f"连续生成的 run_id 不应重复：{ids}")
+
+
 CASES = [
     ("parse_pairs 按第一个 = 切分", case_parse_pairs_split_on_first_equals),
     ("parse_pairs 非法项报错并指出是哪一项", case_parse_pairs_invalid),
@@ -103,6 +116,7 @@ CASES = [
     ("expand_env 展开多个变量", case_expand_env_many_vars),
     ("expand_env 未定义变量报错含名字", case_expand_env_undefined),
     ("expand_env 非字符串原样返回", case_expand_env_non_string),
+    ("new_run_id 格式与唯一性", case_new_run_id_format),
 ]
 
 

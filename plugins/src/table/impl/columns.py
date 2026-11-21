@@ -34,6 +34,9 @@ class SelectColumns(TableIn):
     def __init__(self, config):
         self.columns = config["columns"]
         self.strict = config["strict"]
+        duplicates = sorted({c for c in self.columns if self.columns.count(c) > 1})
+        if duplicates:
+            raise ValueError(f"columns 里有重复列名：{duplicates}")
 
     def invoke(self, data):
         if self.strict:
@@ -181,23 +184,26 @@ _FALSE = {"0", "false", "no", "n", "否"}
 
 
 def _to_bool(pd, series, errors, column):
-    """按常见字面量转布尔；astype(bool) 会把 "0" 也当成 True，不能用。"""
+    """数值列按 1/0、文本列按常见字面量；astype(bool) 会把 "0" 也当成 True，不能用。"""
     if pd.api.types.is_bool_dtype(series):
         return series.astype(bool)
-    lowered = series.astype("string").str.strip().str.lower()
-    converted = lowered.map(
-        lambda value: True
-        if isinstance(value, str) and value in _TRUE
-        else False
-        if isinstance(value, str) and value in _FALSE
-        else pd.NA
-    ).astype("boolean")
+    if pd.api.types.is_numeric_dtype(series):
+        converted = series.map({1: True, 0: False}).astype("boolean")
+    else:
+        lowered = series.astype("string").str.strip().str.lower()
+        converted = lowered.map(
+            lambda value: True
+            if isinstance(value, str) and value in _TRUE
+            else False
+            if isinstance(value, str) and value in _FALSE
+            else pd.NA
+        ).astype("boolean")
     if errors == "raise":
         bad = series[converted.isna() & series.notna()]
         if not bad.empty:
             raise ValueError(
                 f"列 {column} 有 {len(bad)} 个值无法转成布尔"
-                f"（支持 1/0、true/false、yes/no、是/否）：{list(bad.head(5))}"
+                f"（布尔只接受 1/0、true/false、yes/no、是/否）：{list(bad.head(5))}"
             )
     return converted
 

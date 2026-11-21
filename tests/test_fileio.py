@@ -16,54 +16,25 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from engine.errors import ExecutionError
-from engine.registry import Registry
-from engine.runner import run
-from engine.workflow import validate
 
 from _harness import (
     check,
     env_guard,
     expect_raises,
+    get_registry,
     invoke,
+    node,
     run_cases,
+    run_workflow,
     source_node,
 )
-
-
-_REGISTRY = None
-
-
-def get_registry():
-    global _REGISTRY
-    if _REGISTRY is None:
-        _REGISTRY = Registry().load(ROOT / "plugins")
-    return _REGISTRY
 
 
 def table(plugin, name, config=None, **inputs):
     return invoke(get_registry(), plugin, name, config, **inputs)["table"]
 
 
-def node(node_id, plugin, component, config=None, inputs=None):
-    return {
-        "id": node_id,
-        "plugin": plugin,
-        "component": component,
-        "config": {} if config is None else config,
-        "inputs": {} if inputs is None else inputs,
-    }
-
-
-def run_workflow(raw):
-    registry = get_registry()
-    report = validate(registry, raw)
-    check(report.ok, f"工作流应校验通过，实际错误：{report.errors}")
-    return run(report.workflow, registry)
-
-
-# --------------------------------------------------------------------------
-# LoadCSV
-# --------------------------------------------------------------------------
+# ---- LoadCSV ----
 
 def case_load_csv_plain():
     with tempfile.TemporaryDirectory(prefix="engine_fileio_test_") as tmp:
@@ -103,9 +74,7 @@ def case_load_csv_gbk():
     check(result["名称"].iloc[0] == "甲", f"中文内容不对：{result['名称'].tolist()}")
 
 
-# --------------------------------------------------------------------------
-# LoadExcel
-# --------------------------------------------------------------------------
+# ---- LoadExcel ----
 
 def _write_workbook(path):
     with pd.ExcelWriter(path, engine="openpyxl") as writer:
@@ -129,9 +98,7 @@ def case_load_excel_named_sheet():
     check(list(result.columns) == ["b"], f"指定 sheet 没生效：{list(result.columns)}")
 
 
-# --------------------------------------------------------------------------
-# SaveCSV
-# --------------------------------------------------------------------------
+# ---- SaveCSV ----
 
 def case_save_csv_empty_output():
     """SaveCSV 输出端口为空，执行器必须接受 {}；回读内容要与写入一致。"""
@@ -150,7 +117,7 @@ def case_save_csv_empty_output():
                 ),
             ],
         }
-        results = run_workflow(raw)
+        results = run_workflow(get_registry(), raw)
         check(results["n2"].outputs == {}, f"空输出应为 {{}}：{results['n2'].outputs}")
         check(written.is_file(), f"应写出 {written}")
         original = results["n1"].outputs["table"]
@@ -162,31 +129,24 @@ def case_save_csv_empty_output():
     )
 
 
-# --------------------------------------------------------------------------
-# 路径里的 ${变量}
-# --------------------------------------------------------------------------
+# ---- 路径里的 ${变量} ----
 
 def case_workspace_expanded():
     with tempfile.TemporaryDirectory(prefix="engine_fileio_test_") as tmp, env_guard():
         (Path(tmp) / "data.csv").write_text("x,y\n1,2\n3,4\n", encoding="utf-8")
         os.environ["workspace"] = tmp
-        registry = get_registry()
-        report = validate(
-            registry,
-            {
-                "name": "csv",
-                "nodes": [
-                    node(
-                        "n1",
-                        "fileio",
-                        "LoadCSV",
-                        {"path": "${workspace}/data.csv"},
-                    )
-                ],
-            },
-        )
-        check(report.ok, f"工作流应校验通过，实际错误：{report.errors}")
-        results = run(report.workflow, registry)
+        raw = {
+            "name": "csv",
+            "nodes": [
+                node(
+                    "n1",
+                    "fileio",
+                    "LoadCSV",
+                    {"path": "${workspace}/data.csv"},
+                )
+            ],
+        }
+        results = run_workflow(get_registry(), raw)
         result = results["n1"].outputs["table"]
     check(list(result.columns) == ["x", "y"], f"列名不对：{list(result.columns)}")
     check(list(result["x"]) == [1, 3], f"数据不对：{list(result['x'])}")
@@ -195,28 +155,20 @@ def case_workspace_expanded():
 def case_undefined_env_fails():
     with env_guard():
         os.environ.pop("ENGINE_CSV_NOPE", None)
-        registry = get_registry()
-        report = validate(
-            registry,
-            {
-                "name": "csv",
-                "nodes": [
-                    node(
-                        "n1",
-                        "fileio",
-                        "LoadCSV",
-                        {"path": "${ENGINE_CSV_NOPE}/data.csv"},
-                    )
-                ],
-            },
-        )
-        check(
-            report.ok,
-            f"工作流应校验通过（路径只是字符串），实际错误：{report.errors}",
-        )
+        raw = {
+            "name": "csv",
+            "nodes": [
+                node(
+                    "n1",
+                    "fileio",
+                    "LoadCSV",
+                    {"path": "${ENGINE_CSV_NOPE}/data.csv"},
+                )
+            ],
+        }
         expect_raises(
             ExecutionError,
-            lambda: run(report.workflow, registry),
+            lambda: run_workflow(get_registry(), raw),
             "初始化失败",
             "n1",
             "环境变量未定义",

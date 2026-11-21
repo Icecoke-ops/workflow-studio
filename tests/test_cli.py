@@ -18,6 +18,7 @@ if str(ROOT) not in sys.path:
 from engine.cli import _force_utf8, main as cli_main
 
 from _harness import (
+    RUN_ID_RE,
     check,
     env_guard,
     plugin_source,
@@ -169,6 +170,28 @@ def case_plugins_dir_before_after():
     )
 
 
+def case_plugins_dir_mixed():
+    """-p 在子命令前后混写时，两边指定的目录都要参与扫描。"""
+    with tempfile.TemporaryDirectory(prefix="engine_cli_test_") as tmp:
+        root = Path(tmp)
+        dir_a = root / "a"
+        dir_b = root / "b"
+        dir_a.mkdir()
+        dir_b.mkdir()
+        write_zip(
+            dir_a, "climixa.zip", {"climixa/__init__.py": "", "climixa/components.py": plugin_source("climixa")}
+        )
+        write_zip(
+            dir_b, "climixb.zip", {"climixb/__init__.py": "", "climixb/components.py": plugin_source("climixb")}
+        )
+        code, out, err = call_cli(["-p", str(dir_a), "plugins", "-p", str(dir_b)])
+    check(code == 0, f"-p 混写应 exit 0，实际 {code}；stderr：{err!r}")
+    check(
+        "climixa" in out and "climixb" in out,
+        f"子命令前后的目录都应扫描到：{out!r}",
+    )
+
+
 def _env_probe_source():
     """__init__ 在 run 时执行，此时 env 已按启动值 → 工作流 → 命令行的顺序写好；
     把值打印出来，就能从 CLI 输出里读回最终生效的那一层。"""
@@ -249,6 +272,52 @@ def case_env_option_before_after():
     )
 
 
+def case_env_option_mixed_order():
+    """-e 写在子命令前后混着来也要合并；同名时按出现顺序后者覆盖。"""
+    with env_guard(), tempfile.TemporaryDirectory(prefix="engine_cli_env_") as tmp:
+        _write_env_probe(tmp)
+        wf = _env_probe_workflow(tmp, "envmix")
+        mixed = call_cli(["-e", "A=1", "-p", tmp, "run", str(wf), "-e", "B=2"])
+        ordered = call_cli(["-e", "A=1", "-p", tmp, "run", str(wf), "-e", "A=2"])
+        mixed_env = _read_env_dump(mixed[1])
+        ordered_env = _read_env_dump(ordered[1])
+    check(mixed[0] == 0, f"混写 -e 应 exit 0，实际 {mixed[0]}；stderr：{mixed[2]!r}")
+    check(
+        (mixed_env.get("A"), mixed_env.get("B")) == ("1", "2"),
+        f"-e 混写没合并全：A={mixed_env.get('A')!r} B={mixed_env.get('B')!r}",
+    )
+    check(
+        ordered_env.get("A") == "2",
+        f"同名 -e 应按出现顺序后者覆盖，实际 {ordered_env.get('A')!r}",
+    )
+
+
+def case_env_option_after_all_subcommands():
+    """-e 写在 plugins / validate / run 三个子命令后面都要被接受，不能变成 exit 2。"""
+    with env_guard(), tempfile.TemporaryDirectory(prefix="engine_cli_env_") as tmp:
+        write_demo_data(tmp)
+        previous = os.getcwd()
+        os.chdir(tmp)
+        try:
+            plugins = call_cli(["-p", PLUGINS, "plugins", "-e", "A=1"])
+            validated = call_cli(["-p", PLUGINS, "validate", "-e", "A=1", DEMO])
+            executed = call_cli(["-p", PLUGINS, "run", "-e", "A=1", DEMO])
+        finally:
+            os.chdir(previous)
+    for name, (code, out, err) in (
+        ("plugins", plugins),
+        ("validate", validated),
+        ("run", executed),
+    ):
+        check(
+            code == 0,
+            f"{name} 子命令后写 -e 应 exit 0，实际 {code}；stderr：{err!r}",
+        )
+    check("core" in plugins[1], f"plugins 输出不对：{plugins[1]!r}")
+    check("[校验通过]" in validated[1], f"validate 输出不对：{validated[1]!r}")
+    check("[完成]" in executed[1], f"run 输出不对：{executed[1]!r}")
+
+
 def case_env_option_invalid():
     code, out, err = call_cli(["-e", "A", "-p", PLUGINS, "validate", DEMO])
     check(code == 1, f"-e 缺 = 应 exit 1，实际 {code}")
@@ -283,6 +352,10 @@ def case_env_priority():
         dump.get("workflow") == str(wf.resolve()),
         f"workflow 应是传入 JSON 的绝对路径，实际 {dump.get('workflow')!r}",
     )
+    check(
+        RUN_ID_RE.match(dump.get("run_id") or ""),
+        f"run_id 格式应为 YYYYmmdd-HHMMSS-xxxx，实际 {dump.get('run_id')!r}",
+    )
 
 
 def case_plugins_command():
@@ -292,6 +365,10 @@ def case_plugins_command():
         check(token in out, f"输出里应包含 {token}：{out!r}")
     check("类型" in out, f"输出里应包含类型清单：{out!r}")
     check("组件" in out, f"输出里应包含组件清单：{out!r}")
+    check(
+        "统计量在当前表上计算" in out,
+        f"FillMissing 说明应提醒统计量口径：{out!r}",
+    )
     check(err == "", f"plugins 子命令不应输出错误：{err!r}")
 
 
@@ -306,7 +383,10 @@ CASES = [
     ("非法 JSON 文件 exit 1", case_invalid_json_file),
     ("插件目录不存在 exit 0 + 警告", case_missing_plugins_dir),
     ("-p 写在子命令前后输出一致", case_plugins_dir_before_after),
+    ("-p 在子命令前后混写两边都扫描", case_plugins_dir_mixed),
     ("-e 写在子命令前后结果一致", case_env_option_before_after),
+    ("-e 混写合并且同名后者覆盖", case_env_option_mixed_order),
+    ("-e 在三个子命令后都被接受", case_env_option_after_all_subcommands),
     ("-e 缺 = 时 exit 1", case_env_option_invalid),
     ("env 三级优先级：命令行 > 工作流 > 启动值", case_env_priority),
     ("plugins 子命令列出插件与组件", case_plugins_command),

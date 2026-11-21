@@ -3,12 +3,14 @@
     python tools/build_web.py             # npm 构建 + 拷贝
     python tools/build_web.py --no-build  # 只拷贝已有的 frontend/dist
 
-npm 走 cmd 重定向执行（沙箱里直接 spawn 管道会 EPERM）。
+npm 用参数列表直接执行，输出重定向到日志文件（沙箱禁止管道捕获）。
+Windows 上 shutil.which("npm") 拿到的是无扩展名脚本，优先取 npm.cmd。
 """
 
 import argparse
 import shutil
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 
@@ -24,17 +26,16 @@ def run_build():
     if not package_json.is_file():
         raise SystemExit(f"找不到 {package_json}")
 
-    LOG.unlink(missing_ok=True)
-    command = f'npm --prefix "{FRONTEND}" run build > "{LOG}" 2>&1'
-    print(f"[构建] {command}")
-    # shell=True 在 Windows 上就是 cmd /c <原样命令串>；
-    # 用列表传参会把内层引号转义坏，反而让 cmd 报语法错误。
-    completed = subprocess.run(command, shell=True, cwd=ROOT)
+    npm = shutil.which("npm.cmd") or shutil.which("npm")
+    if not npm:
+        raise SystemExit("找不到 npm，确认 Node.js 已安装并在 PATH 中")
 
-    output = ""
-    if LOG.is_file():
-        output = LOG.read_text(encoding="utf-8", errors="replace")
-        print(output.rstrip())
+    command = [npm, "--prefix", str(FRONTEND), "run", "build"]
+    print(f"[构建] {subprocess.list2cmdline(command)}  (日志：{LOG})")
+    with LOG.open("w", encoding="utf-8", errors="replace") as log_file:
+        completed = subprocess.run(command, cwd=ROOT, stdout=log_file, stderr=subprocess.STDOUT)
+
+    print(LOG.read_text(encoding="utf-8", errors="replace").rstrip())
     if completed.returncode != 0:
         raise SystemExit(f"[构建失败] npm 退出码 {completed.returncode}，完整日志：{LOG}")
 
@@ -54,6 +55,10 @@ def copy_dist():
 
 
 def main():
+    # npm 日志里有 ✓ 之类的字符，重定向到文件时默认 cp936 编码会裸栈崩掉
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+
     parser = argparse.ArgumentParser(description="构建前端并拷贝到 studio/web")
     parser.add_argument("--no-build", action="store_true", help="跳过 npm build，只拷贝 dist")
     args = parser.parse_args()

@@ -4,15 +4,55 @@
 """
 
 import os
+import re
 import traceback
 import zipfile
 from contextlib import contextmanager
 from pathlib import Path
 
+from engine.registry import Registry
+from engine.runner import run
+from engine.workflow import validate
+
+RUN_ID_RE = re.compile(r"^\d{8}-\d{6}-[0-9a-f]{4}$")
+
+_ROOT = Path(__file__).resolve().parent.parent
+_REGISTRY = None
+
 
 def check(condition, message):
     if not condition:
         raise AssertionError(message)
+
+
+def get_registry():
+    """真实插件注册表只加载一次。
+
+    run_all 是在同一进程里 exec_module 所有测试文件，不是每个文件独立进程；
+    缓存能成立的真实原因是「用到它的文件都排在 test_cli 之前」——test_cli 会
+    重新 load 插件并 purge 模块，但那之后 registry 里保存的类对象仍然可用。
+    新加的测试若要用这个缓存，仍放在 test_cli 前面；否则自己 Registry().load()。
+    """
+    global _REGISTRY
+    if _REGISTRY is None:
+        _REGISTRY = Registry().load(_ROOT / "plugins")
+    return _REGISTRY
+
+
+def node(node_id, plugin, component, config=None, inputs=None):
+    return {
+        "id": node_id,
+        "plugin": plugin,
+        "component": component,
+        "config": {} if config is None else config,
+        "inputs": {} if inputs is None else inputs,
+    }
+
+
+def run_workflow(registry, raw):
+    report = validate(registry, raw)
+    check(report.ok, f"工作流应校验通过，实际错误：{report.errors}")
+    return run(report.workflow, registry)
 
 
 def expect_raises(exc_type, fn, *fragments):
@@ -66,8 +106,8 @@ def run_cases(label, cases):
     return 0
 
 
-def instantiate(registry, plugin, name, config=None):
-    """按引擎的方式补默认值再实例化。
+def invoke(registry, plugin, name, config=None, **inputs):
+    """按引擎的方式补默认值再实例化后执行。
 
     直接调组件时必须先补默认值，否则要么 KeyError，要么测试自己手抄一份默认值、
     改产品默认值时悄无声息地脱节。
@@ -77,22 +117,11 @@ def instantiate(registry, plugin, name, config=None):
     entry = registry.get_component(plugin, name)
     if entry is None:
         raise AssertionError(f"组件不存在：{plugin}.{name}")
-    return entry.cls(fill_defaults(entry.config_schema, config or {}))
-
-
-def invoke(registry, plugin, name, config=None, **inputs):
-    instance = instantiate(registry, plugin, name, config)
+    instance = entry.cls(fill_defaults(entry.config_schema, config or {}))
     try:
         return instance.invoke(**inputs)
     finally:
         instance.close()
-
-
-def write_source_csv(directory, filename="data.csv"):
-    """写一份最小 CSV；工作流用例的数据来源都从这里来。"""
-    path = Path(directory) / filename
-    path.write_text("x,y\n0,1\n1,3\n2,5\n", encoding="utf-8")
-    return path
 
 
 def write_demo_data(directory, filename="data.csv"):
@@ -118,7 +147,8 @@ def source_node(directory, node_id="n1", filename="data.csv"):
     插件层没有「造数据」组件了，要真正 run 的用例都得先落一个文件；路径用绝对路径，
     调用方就不用再为每个用例折腾 ``${workspace}``。
     """
-    path = write_source_csv(directory, filename)
+    path = Path(directory) / filename
+    path.write_text("x,y\n0,1\n1,3\n2,5\n", encoding="utf-8")
     return {
         "id": node_id,
         "plugin": "fileio",
@@ -182,7 +212,6 @@ def plugin_source(
     *,
     version="1.0",
     title="测试插件",
-    types=None,
     class_name="Thing",
     input_schema="{}",
     output_schema="{}",
@@ -221,7 +250,5 @@ def plugin_source(
             f'PLUGIN_TITLE = "{title}"',
         ]
     )
-    if types:
-        lines.append(f"PLUGIN_TYPES = {types}")
     lines.extend(["", component.rstrip("\n"), "", components])
     return "\n".join(lines) + "\n"

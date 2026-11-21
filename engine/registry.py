@@ -6,6 +6,7 @@
 2. 类型全集就位后，再校验并解析每个组件的 schema
 """
 
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -13,7 +14,15 @@ from . import schema as schema_mod
 from . import stdtypes
 from .api import Component
 from .errors import PluginLoadError, SchemaError, WorkflowError
-from .loader import PluginInfo, add_all_to_sys_path, find_zips, load_plugin
+from .loader import (
+    PluginInfo,
+    _is_importable_top_level,
+    _package_name,
+    add_all_to_sys_path,
+    find_zips,
+    load_plugin,
+    unmount_plugins,
+)
 from .typeid import qualify, resolve
 
 
@@ -43,6 +52,7 @@ class Registry:
     # -- 加载 ------------------------------------------------------------
     def load(self, *plugins_dirs):
         self._register_std()
+        unmount_plugins()
         zip_paths = []
         seen = set()
         for plugins_dir in plugins_dirs:
@@ -52,6 +62,15 @@ class Registry:
                     continue
                 seen.add(absolute)
                 zip_paths.append(zip_path)
+        for zip_path in zip_paths:
+            package = _package_name(zip_path)
+            # 内置模块的 import 虽然顶不掉，但必须在 _purge_modules 之前拦住：
+            # 否则 sys.modules 里的真模块会先被删掉、再重建成残骸（sys 尤其致命）。
+            if package in sys.stdlib_module_names or _is_importable_top_level(package):
+                raise PluginLoadError(
+                    f"{zip_path.name}: 插件名 {package!r} 与已安装的模块/标准库同名，"
+                    f"会顶掉对它的 import，请换一个名字"
+                )
         add_all_to_sys_path(zip_paths)
         infos = []
         for zip_path in zip_paths:
@@ -92,6 +111,16 @@ class Registry:
                 raise PluginLoadError(f"{info.name}: 组件名重复：{name}")
 
             where = f"{info.name}.{name}"
+            title = getattr(cls, "title", "")
+            desc = getattr(cls, "desc", "")
+            if not isinstance(title, str):
+                raise PluginLoadError(
+                    f"{where}: title 必须是字符串，实际 {type(title).__name__}"
+                )
+            if not isinstance(desc, str):
+                raise PluginLoadError(
+                    f"{where}: desc 必须是字符串，实际 {type(desc).__name__}"
+                )
             abstract = getattr(cls, "__abstractmethods__", None)
             if abstract:
                 raise PluginLoadError(
@@ -112,8 +141,8 @@ class Registry:
             self.components[(info.name, name)] = ComponentEntry(
                 plugin=info.name,
                 name=name,
-                title=getattr(cls, "title", "") or name,
-                desc=getattr(cls, "desc", "") or "",
+                title=title or name,
+                desc=desc,
                 cls=cls,
                 config_schema=config_schema,
                 input_schema=self._resolve_inputs(input_schema, info, where),

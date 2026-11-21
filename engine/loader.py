@@ -18,6 +18,7 @@ import re
 import sys
 import zipfile
 from dataclasses import dataclass, field
+from importlib.machinery import PathFinder
 from pathlib import Path
 
 from . import stdtypes
@@ -30,10 +31,8 @@ DEFAULT_DIR = Path(__file__).resolve().parent.parent / "plugins"
 
 # importlib.metadata 每次查询都会扫一遍 sys.path（包括所有插件 zip），
 # 按发行名缓存一下，N 个插件 × M 个依赖不要重复扫。
-#
-# ponytail: 扫描过程会留下未关闭的 ZipFile 句柄，Windows 上表现为插件 zip 删不掉。
-#           现在插件一次加载到底、进程退出即释放，影响仅限「同进程反复 build+reload 后删旧 zip」。
-#           真要做插件热卸载，再引入显式的句柄回收。
+# ponytail: 扫描会留下未关闭的 ZipFile 句柄，进程退出才释放；Windows 上 reload
+#           后删旧 zip 可能失败。真要热卸载插件，再引入显式句柄回收。
 _INSTALLED = {}
 
 
@@ -43,8 +42,6 @@ def _installed_version(dist):
         return _INSTALLED[key]
     try:
         _INSTALLED[key] = importlib.metadata.version(dist)
-    except importlib.metadata.PackageNotFoundError:
-        _INSTALLED[key] = None
     except Exception:
         _INSTALLED[key] = None
     return _INSTALLED[key]
@@ -68,16 +65,38 @@ def find_zips(plugins_dir):
     return sorted(path.glob("*.zip"))
 
 
+_MOUNTED = set()
+
+
+def unmount_plugins():
+    for path in list(_MOUNTED):
+        while path in sys.path:
+            sys.path.remove(path)
+    _MOUNTED.clear()
+
+
+def _mount(path):
+    path = str(Path(path).resolve())
+    if path in sys.path:
+        sys.path.remove(path)
+    sys.path.insert(0, path)
+    _MOUNTED.add(path)
+
+
 def add_all_to_sys_path(zip_paths):
     """先把所有插件 zip 挂上 sys.path，再逐个 import。
 
     这样插件之间互相 import 就不受文件名顺序影响（B 依赖 A 时，
     A 是否排在前面不该决定成败）。
     """
+    unmount_plugins()
     for zip_path in zip_paths:
-        zip_str = str(Path(zip_path).resolve())
-        if zip_str not in sys.path:
-            sys.path.insert(0, zip_str)
+        _mount(zip_path)
+
+
+def _is_importable_top_level(name):
+    spec = PathFinder.find_spec(name)
+    return spec is not None and spec.loader is not None
 
 
 def _is_junk(name):
@@ -109,9 +128,14 @@ def _package_name(zip_path):
         )
     files = set(names)
 
-    root_py = [n for n in names if "/" not in n and n.endswith(".py")]
-    if root_py:
-        raise PluginLoadError(f"{zip_path.name}: 源文件必须放在 {package}/ 目录下，发现根目录文件 {root_py}")
+    root_importable = [
+        n for n in names if "/" not in n and n.endswith((".py", ".pyc", ".pyo"))
+    ]
+    if root_importable:
+        raise PluginLoadError(
+            f"{zip_path.name}: 源码/字节码必须放在 {package}/ 目录下，"
+            f"发现根目录文件 {root_importable}"
+        )
 
     dirs = {n.rsplit("/", 1)[0] for n in names if n.endswith(".py") and "/" in n}
     for directory in sorted(dirs):
@@ -140,6 +164,11 @@ def _check_requirements(zip_path, package):
         dist = _REQ_SPLIT.split(line, 1)[0].strip()
         if not dist:
             continue
+        if dist != line:
+            print(
+                f"[警告] 插件 {package} 的依赖 {line} 只检查是否已安装，不校验版本",
+                file=sys.stderr,
+            )
         if _installed_version(dist) is None:
             missing.append(dist)
     if missing:
@@ -161,9 +190,7 @@ def _purge_modules(package):
 
 
 def _import_components(zip_path, package):
-    zip_str = str(Path(zip_path).resolve())
-    if zip_str not in sys.path:
-        sys.path.insert(0, zip_str)
+    _mount(zip_path)
     _purge_modules(package)
     importlib.invalidate_caches()
     try:
@@ -174,11 +201,6 @@ def _import_components(zip_path, package):
 
 def _collect_types(module, package):
     types = {}
-    declared = getattr(module, "PLUGIN_TYPES", None)
-    if declared is not None:
-        if not isinstance(declared, dict):
-            raise PluginLoadError(f"{package}: PLUGIN_TYPES 必须是 dict")
-        types.update(declared)
     # 区分「没有 types.py」和「types.py 里自己的 import 写错了」：
     # 后者必须报出来，不能当成没有 types.py 静默跳过。
     try:
@@ -224,6 +246,10 @@ def load_plugin(zip_path, loaded_names):
     if not is_version(version):
         raise PluginLoadError(f"{zip_path.name}: PLUGIN_VERSION 缺失或不合法：{version!r}")
     title = getattr(module, "PLUGIN_TITLE", "") or name
+    if not isinstance(title, str):
+        raise PluginLoadError(
+            f"{zip_path.name}: PLUGIN_TITLE 必须是字符串，实际 {type(title).__name__}"
+        )
 
     components = getattr(module, "COMPONENTS", None)
     if not isinstance(components, (list, tuple)) or not components:

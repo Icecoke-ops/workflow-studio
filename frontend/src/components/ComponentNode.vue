@@ -14,10 +14,6 @@ const { removeNodes } = useVueFlow()
 const rowCount = computed(() =>
   Math.max(props.data.inPorts?.length || 0, props.data.outPorts?.length || 0),
 )
-
-function toggleSection(key) {
-  props.data[key] = !props.data[key]
-}
 </script>
 
 <template>
@@ -109,7 +105,7 @@ function toggleSection(key) {
             class="collapse-toggle nodrag nopan"
             type="button"
             @pointerdown.stop
-            @click.stop="toggleSection('descOpen')"
+            @click.stop="data.descOpen = !data.descOpen"
           >
             <span class="collapse-chevron">{{ data.descOpen ? '▾' : '▸' }}</span>
             <span>组件介绍</span>

@@ -23,7 +23,7 @@ class NodeSpec:
     component: str
     config: dict
     inputs: dict  # {输入端口: (来源节点 id, 来源输出端口)}
-    entry: object = None
+    entry: object
 
 
 @dataclass

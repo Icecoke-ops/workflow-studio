@@ -48,14 +48,7 @@ def _same_scalar(left, right):
     return left == right
 
 
-def _hint(spec):
-    title = spec.get("title")
-    return f"（{title}）" if title else ""
-
-
-# --------------------------------------------------------------------------
-# 插件作者写错 schema：直接抛错，不让它进到运行时
-# --------------------------------------------------------------------------
+# ---- 插件作者写错 schema：直接抛错，不让它进到运行时 ----
 
 def check_config_schema(schema, where):
     if not isinstance(schema, dict):
@@ -150,9 +143,7 @@ def check_output_schema(schema, where):
             raise SchemaError(f"{w}: type 必须是非空字符串")
 
 
-# --------------------------------------------------------------------------
-# 节点取值校验
-# --------------------------------------------------------------------------
+# ---- 节点取值校验 ----
 
 def fill_defaults(schema, values):
     """按 schema 补齐默认值，返回新 dict。
@@ -182,7 +173,8 @@ def check_config_values(schema, values, where):
         w = f"{where}.{name}"
         if name not in values:
             if spec.get("required") and "default" not in spec:
-                errors.append(f"{w}: 缺少必填参数{_hint(spec)}")
+                hint = f"（{spec['title']}）" if spec.get("title") else ""
+                errors.append(f"{w}: 缺少必填参数{hint}")
             continue
         errors.extend(_check_value(spec, values[name], w))
     return errors

@@ -1,6 +1,6 @@
 """本地 Web API：给 Vue 前端提供插件查询、校验和执行接口。
 
-    python -m studio [--plugins-dir DIR ...] [-e KEY=VALUE ...] [--port 8765] [--host 127.0.0.1]
+    python -m studio [--plugins-dir DIR ...] [-e KEY=VALUE ...] [--host 127.0.0.1] [--port 8765] [--allow-remote]
 
 分层：:class:`EngineService` 只做业务（registry -> 契约载荷），
 :class:`StudioHandler` 只做 HTTP 路由/序列化/静态文件。
@@ -16,21 +16,21 @@
 """
 
 import argparse
+import ipaddress
 import json
 import mimetypes
 import os
-import secrets
 import sys
 import tempfile
 import threading
-import time
+import traceback
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import unquote, urlsplit
 
 from engine import __version__ as ENGINE_VERSION
-from engine.env import parse_pairs, restore, snapshot
+from engine import env as env_mod
 from engine.errors import WorkflowError
 from engine.loader import DEFAULT_DIR
 from engine.preview import preview
@@ -42,6 +42,7 @@ from engine.workflow import validate
 from . import __version__
 from .contract import (
     ApiService,
+    ContractError,
     check_health,
     check_plugins,
     check_run,
@@ -55,15 +56,14 @@ TEMP_DIR = Path(tempfile.gettempdir()) / "workflow-studio"
 MAX_BODY = 16 * 1024 * 1024
 HINT_TEXT = "请先运行 python tools/build_web.py 构建前端"
 
+# 只覆盖 run；任何新接口若要临时改 os.environ，必须拿同一把锁
 _RUN_LOCK = threading.Lock()
 
 _JSON = "application/json; charset=utf-8"
 _HTML = "text/html; charset=utf-8"
 
 
-# --------------------------------------------------------------------------
-# 业务层
-# --------------------------------------------------------------------------
+# ---- 业务层 ----
 
 class EngineService(ApiService):
     """基于 engine 注册表的业务实现，不碰任何 HTTP 细节。"""
@@ -118,16 +118,15 @@ class EngineService(ApiService):
         if not report.ok:
             return payload
 
-        run_id = time.strftime("%Y%m%d-%H%M%S") + "-" + secrets.token_hex(2)
+        run_id = env_mod.new_run_id()
         TEMP_DIR.mkdir(parents=True, exist_ok=True)
         path = TEMP_DIR / f"run_{run_id}.json"
         path.write_text(json.dumps(workflow, ensure_ascii=False), encoding="utf-8")
 
-        state = snapshot()
+        state = env_mod.snapshot()
         try:
             os.environ.update({"workflow": str(path), "run_id": run_id})
-            os.environ.update(report.workflow.env)
-            os.environ.update(self.cli_env)
+            env_mod.apply(report.workflow.env, self.cli_env)
 
             workflow_obj = report.workflow
             done = {}
@@ -149,7 +148,7 @@ class EngineService(ApiService):
             payload["nodes"] = _nodes_payload(workflow_obj, done, None, None)
             return payload
         finally:
-            restore(state)
+            env_mod.restore(state)
             path.unlink(missing_ok=True)
 
 
@@ -204,7 +203,9 @@ def _nodes_payload(workflow, done, failed_id, error_message):
         if node_id in done:
             result = done[node_id]
             item["ms"] = round(result.ms, 2)
-            item["outputs"] = _preview_outputs(result.outputs)
+            item["outputs"] = {
+                port: preview(value) for port, value in result.outputs.items()
+            }
         elif node_id == failed_id:
             item["error"] = error_message
         else:
@@ -213,13 +214,7 @@ def _nodes_payload(workflow, done, failed_id, error_message):
     return nodes
 
 
-def _preview_outputs(outputs):
-    return {port: preview(value) for port, value in outputs.items()}
-
-
-# --------------------------------------------------------------------------
-# 传输层
-# --------------------------------------------------------------------------
+# ---- 传输层 ----
 
 class StudioServer(ThreadingHTTPServer):
     daemon_threads = True
@@ -232,6 +227,7 @@ class StudioServer(ThreadingHTTPServer):
 
 class StudioHandler(BaseHTTPRequestHandler):
     server_version = f"Studio/{__version__}"
+    timeout = 30
 
     def do_GET(self):
         self._dispatch(self._handle_get)
@@ -283,11 +279,20 @@ class StudioHandler(BaseHTTPRequestHandler):
             handler()
         except (BrokenPipeError, ConnectionResetError):
             pass
-        except Exception as exc:  # 兜底：任何意外都回 JSON，不吐 traceback
+        except ContractError as exc:
             try:
                 self._send_json(
                     HTTPStatus.INTERNAL_SERVER_ERROR,
-                    {"ok": False, "errors": [f"服务器内部错误：{exc}"]},
+                    {"ok": False, "errors": [str(exc)]},
+                )
+            except Exception:
+                pass
+        except Exception:
+            traceback.print_exc()
+            try:
+                self._send_json(
+                    HTTPStatus.INTERNAL_SERVER_ERROR,
+                    {"ok": False, "errors": ["服务器内部错误"]},
                 )
             except Exception:
                 pass
@@ -367,9 +372,16 @@ class StudioHandler(BaseHTTPRequestHandler):
         return payload
 
 
-# --------------------------------------------------------------------------
-# 启动
-# --------------------------------------------------------------------------
+# ---- 启动 ----
+
+def _is_loopback(host):
+    if host in ("localhost", "::1"):
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
 
 def main(argv=None):
     parser = argparse.ArgumentParser(
@@ -385,6 +397,11 @@ def main(argv=None):
     parser.add_argument("--host", default="127.0.0.1", help="监听地址（默认 127.0.0.1）")
     parser.add_argument("--port", type=int, default=8765, help="监听端口（默认 8765）")
     parser.add_argument(
+        "--allow-remote",
+        action="store_true",
+        help="允许监听非回环地址（服务无认证，局域网内谁都能调用）",
+    )
+    parser.add_argument(
         "-e",
         "--env",
         action="append",
@@ -394,8 +411,23 @@ def main(argv=None):
     )
     args = parser.parse_args(argv)
 
+    if not _is_loopback(args.host):
+        if not args.allow_remote:
+            print(
+                f"[拒绝启动] --host {args.host} 不是回环地址：服务没有认证，"
+                "局域网内任何人都能调用 API（含文件读写）。"
+                "确需远程访问请加 --allow-remote。",
+                file=sys.stderr,
+            )
+            return 1
+        print(
+            f"[警告] 已允许远程访问 {args.host}:{args.port}：服务没有认证，"
+            "局域网内任何人都能调用 API（含文件读写）。",
+            file=sys.stderr,
+        )
+
     try:
-        cli_env = parse_pairs(args.env or [])
+        cli_env = env_mod.parse_pairs(args.env or [])
     except ValueError as exc:
         print(f"[环境变量不合法] {exc}", file=sys.stderr)
         return 1

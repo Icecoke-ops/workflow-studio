@@ -28,6 +28,7 @@ ORDER = [
     "test_contract.py",
     "test_standalone.py",
     "test_frontend.py",
+    "test_studio_api.py",
 ]
 
 

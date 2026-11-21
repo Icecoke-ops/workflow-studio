@@ -3,8 +3,8 @@
 MAX_CHARS = 600
 
 
-def _cut(text, limit):
-    return text if len(text) <= limit else text[:limit] + "…"
+def _cut(text):
+    return text if len(text) <= MAX_CHARS else text[:MAX_CHARS] + "…"
 
 
 def preview(value):
@@ -17,18 +17,15 @@ def preview(value):
         if isinstance(value, pd.DataFrame):
             columns = [str(c) for c in value.columns]
             head = value.head(5).to_string()
-            return _cut(
-                f"DataFrame {value.shape[0]} 行 × {value.shape[1]} 列 {columns}\n{head}",
-                MAX_CHARS,
-            )
+            return _cut(f"DataFrame {value.shape[0]} 行 × {value.shape[1]} 列 {columns}\n{head}")
         if isinstance(value, pd.Series):
-            return _cut(f"Series {len(value)} 项\n{value.head(5).to_string()}", MAX_CHARS)
+            return _cut(f"Series {len(value)} 项\n{value.head(5).to_string()}")
 
     if type(value).__name__ == "ndarray":
         shape = getattr(value, "shape", "?")
-        return _cut(f"ndarray shape={shape}\n{value!r}", MAX_CHARS)
+        return _cut(f"ndarray shape={shape}\n{value!r}")
 
     if isinstance(value, (str, int, float, bool)) or value is None:
-        return _cut(repr(value), MAX_CHARS)
+        return _cut(repr(value))
 
-    return _cut(f"{type(value).__name__} {value!r}", MAX_CHARS)
+    return _cut(f"{type(value).__name__} {value!r}")

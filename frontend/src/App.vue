@@ -10,7 +10,8 @@ import Inspector from './components/Inspector.vue'
 import Palette from './components/Palette.vue'
 import ResultPanel from './components/ResultPanel.vue'
 import { fetchHealth, fetchPlugins, runWorkflow, validateWorkflow } from './api'
-import { buildWorkflow as modelBuildWorkflow, defaultsFor } from './model'
+import { buildNodeData, planImport } from './importWorkflow'
+import { buildWorkflow as modelBuildWorkflow } from './model'
 import { envError, envToRows } from './workflow'
 
 const TYPE_COLORS = [
@@ -40,7 +41,8 @@ const envDrawerVisible = ref(false)
 
 const validateReport = ref(null)
 const runResult = ref(null)
-const busy = ref('')
+const validating = ref(false)
+const running = ref(false)
 const activeTab = ref('validate')
 const serverOnline = ref(null)
 
@@ -143,76 +145,7 @@ const componentIndex = computed(() => {
   return index
 })
 
-// ---- 类型显示 ----------------------------------------------------------
-
-function typeColor(typeId) {
-  return typeColors.value[typeId] || '#909399'
-}
-
-/** 端口短名直接用后端给的 type_labels / type_label。 */
-function portDisplay(types, labels) {
-  const short = labels.length > 1 ? `${labels[0]} +${labels.length - 1}` : labels[0]
-  const full = types
-    .map((id, index) => `${labels[index]}${typeDescs.value[id] ? ` — ${typeDescs.value[id]}` : ''}`)
-    .join('\n')
-  return { short, full }
-}
-
 // ---- 节点构造 ----------------------------------------------------------
-
-function buildNodeData(component, config) {
-  return {
-    plugin: component.plugin,
-    pluginTitle: component.pluginTitle || '',
-    component: component.name,
-    title: component.title,
-    desc: component.desc,
-    config: { ...defaultsFor(component.config_schema), ...(config || {}) },
-    config_schema: component.config_schema,
-    descOpen: false,
-    paramsOpen: true,
-    inPorts: Object.entries(component.input_schema || {}).map(([name, spec]) => {
-      const display = portDisplay(spec.types, spec.type_labels)
-      return {
-        name,
-        types: spec.types || [],
-        color: typeColor((spec.types || [])[0]),
-        short: display.short,
-        full: display.full,
-      }
-    }),
-    outPorts: Object.entries(component.output_schema || {}).map(([name, spec]) => {
-      const display = portDisplay([spec.type], [spec.type_label])
-      return {
-        name,
-        type: spec.type,
-        color: typeColor(spec.type),
-        short: display.short,
-        full: display.full,
-      }
-    }),
-    missing: false,
-    failed: false,
-  }
-}
-
-function missingNodeData(plugin, component) {
-  return {
-    plugin,
-    pluginTitle: '',
-    component,
-    title: `${plugin}.${component}`,
-    desc: '当前插件集合里没有这个组件',
-    config: {},
-    config_schema: {},
-    descOpen: false,
-    paramsOpen: true,
-    inPorts: [],
-    outPorts: [],
-    missing: true,
-    failed: false,
-  }
-}
 
 function nextNodeId() {
   const used = new Set(nodes.value.map((node) => node.id))
@@ -236,7 +169,7 @@ function addNode({ plugin, component, position }) {
     id: nextNodeId(),
     type: 'comp',
     position: position || autoPosition(),
-    data: buildNodeData(entry, {}),
+    data: buildNodeData(entry, {}, { typeDescs: typeDescs.value, typeColors: typeColors.value }),
   }
   nodes.value = [...nodes.value, node]
 }
@@ -301,133 +234,28 @@ function exportJson() {
   ElMessage.success('已导出工作流 JSON')
 }
 
-function layoutDepth(rawNodes) {
-  const byId = new Map()
-  for (const raw of rawNodes) {
-    if (raw && typeof raw.id === 'string') byId.set(raw.id, raw)
-  }
-  const memo = new Map()
-  const visiting = new Set()
-
-  function depthOf(id) {
-    if (memo.has(id)) return memo.get(id)
-    if (visiting.has(id)) return 0
-    visiting.add(id)
-    const raw = byId.get(id)
-    let depth = 0
-    if (raw && raw.inputs && typeof raw.inputs === 'object') {
-      for (const link of Object.values(raw.inputs)) {
-        if (
-          link &&
-          typeof link === 'object' &&
-          typeof link.from === 'string' &&
-          byId.has(link.from)
-        ) {
-          depth = Math.max(depth, depthOf(link.from) + 1)
-        }
-      }
-    }
-    visiting.delete(id)
-    memo.set(id, depth)
-    return depth
-  }
-
-  return depthOf
-}
-
 async function applyWorkflow(raw) {
-  if (!raw || typeof raw !== 'object') throw new Error('JSON 根节点必须是对象')
-  if (!Array.isArray(raw.nodes)) throw new Error('缺少 nodes 数组')
+  const plan = planImport(raw, {
+    componentFor: (plugin, component) => componentIndex.value.get(`${plugin}.${component}`),
+    typeDescs: typeDescs.value,
+    typeColors: typeColors.value,
+  })
 
-  const raws = []
-  const seen = new Set()
-  const skipped = []
-  for (const item of raw.nodes) {
-    if (!item || typeof item !== 'object') {
-      skipped.push('存在非对象节点')
-      continue
-    }
-    if (typeof item.id !== 'string' || !item.id) {
-      skipped.push('节点缺少 id')
-      continue
-    }
-    if (seen.has(item.id)) {
-      skipped.push(`id 重复：${item.id}`)
-      continue
-    }
-    if (typeof item.plugin !== 'string' || typeof item.component !== 'string') {
-      skipped.push(`${item.id} 缺少 plugin/component`)
-      continue
-    }
-    seen.add(item.id)
-    raws.push(item)
-  }
-
-  const depthOf = layoutDepth(raws)
-  const rows = new Map()
-  const created = []
-  const missing = []
-
-  for (const item of raws) {
-    const depth = depthOf(item.id)
-    const row = rows.get(depth) || 0
-    rows.set(depth, row + 1)
-    const position = { x: 80 + depth * 340, y: 60 + row * 440 }
-    const entry = componentIndex.value.get(`${item.plugin}.${item.component}`)
-    if (!entry) {
-      missing.push(`${item.plugin}.${item.component}`)
-      created.push({
-        id: item.id,
-        type: 'comp',
-        position,
-        data: missingNodeData(item.plugin, item.component),
-      })
-      continue
-    }
-    const config = item.config && typeof item.config === 'object' ? item.config : {}
-    created.push({ id: item.id, type: 'comp', position, data: buildNodeData(entry, config) })
-  }
-
-  const nodeById = new Map(created.map((node) => [node.id, node]))
-  const inputsTaken = new Set()
-  const newEdges = []
-  for (const item of raws) {
-    const targetNode = nodeById.get(item.id)
-    if (!targetNode || !item.inputs || typeof item.inputs !== 'object') continue
-    for (const [port, link] of Object.entries(item.inputs)) {
-      if (!link || typeof link !== 'object') continue
-      if (typeof link.from !== 'string' || typeof link.port !== 'string') continue
-      const sourceNode = nodeById.get(link.from)
-      if (!sourceNode) continue
-      if (!targetNode.data.inPorts.some((entry) => entry.name === port)) continue
-      if (!sourceNode.data.outPorts.some((entry) => entry.name === link.port)) continue
-      const key = `${item.id}.${port}`
-      if (inputsTaken.has(key)) continue
-      inputsTaken.add(key)
-      newEdges.push({
-        id: `e-${item.id}-${port}`,
-        type: 'workflow',
-        source: link.from,
-        target: item.id,
-        sourceHandle: link.port,
-        targetHandle: port,
-      })
-    }
-  }
-
-  workflowName.value = typeof raw.name === 'string' && raw.name ? raw.name : '导入的工作流'
+  workflowName.value = plan.name
   importEnv(raw)
-  nodes.value = created
-  edges.value = newEdges
+  nodes.value = plan.nodes
+  edges.value = plan.edges
   validateReport.value = null
   runResult.value = null
   activeTab.value = 'validate'
 
-  if (missing.length) {
-    ElMessage.warning(`有 ${missing.length} 个组件未加载：${[...new Set(missing)].join(', ')}`)
+  if (plan.missing.length) {
+    ElMessage.warning(
+      `有 ${plan.missing.length} 个组件未加载：${[...new Set(plan.missing)].join(', ')}`,
+    )
   }
-  if (skipped.length) {
-    ElMessage.warning(`导入时跳过 ${skipped.length} 项：${skipped.slice(0, 3).join('；')}`)
+  if (plan.skipped.length) {
+    ElMessage.warning(`导入时跳过 ${plan.skipped.length} 项：${plan.skipped.slice(0, 3).join('；')}`)
   }
 
   await nextTick()
@@ -467,13 +295,13 @@ async function newWorkflow() {
 }
 
 async function doValidate() {
-  busy.value = 'validate'
+  validating.value = true
   try {
     validateReport.value = await validateWorkflow(buildWorkflow())
   } catch (err) {
     validateReport.value = { ok: false, errors: [err.message], warnings: [], order: [] }
   } finally {
-    busy.value = ''
+    validating.value = false
     activeTab.value = 'validate'
   }
 }
@@ -486,7 +314,7 @@ function markFailedNodes(failedIds) {
 }
 
 async function doRun() {
-  busy.value = 'run'
+  running.value = true
   runResult.value = null
   try {
     runResult.value = await runWorkflow(buildWorkflow())
@@ -500,7 +328,7 @@ async function doRun() {
       failedIds: [],
     }
   } finally {
-    busy.value = ''
+    running.value = false
     activeTab.value = 'run'
     markFailedNodes(runResult.value?.failedIds)
   }
@@ -556,10 +384,23 @@ onMounted(async () => {
       <el-button size="small" @click="newWorkflow">新建</el-button>
       <el-button size="small" @click="fileInput.click()">导入 JSON</el-button>
       <el-button size="small" @click="exportJson">导出 JSON</el-button>
-      <el-button size="small" type="primary" plain :loading="busy === 'validate'" @click="doValidate">
+      <el-button
+        size="small"
+        type="primary"
+        plain
+        :loading="validating"
+        :disabled="running"
+        @click="doValidate"
+      >
         校验
       </el-button>
-      <el-button size="small" type="primary" :loading="busy === 'run'" @click="doRun">
+      <el-button
+        size="small"
+        type="primary"
+        :loading="running"
+        :disabled="validating"
+        @click="doRun"
+      >
         运行
       </el-button>
       <el-button size="small" @click="envDrawerVisible = true">环境变量</el-button>

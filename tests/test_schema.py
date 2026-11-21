@@ -36,9 +36,7 @@ def expect_schema_error(fn, *fragments):
     return expect_raises(SchemaError, fn, *fragments)
 
 
-# --------------------------------------------------------------------------
-# 节点取值校验
-# --------------------------------------------------------------------------
+# ---- 节点取值校验 ----
 
 def case_integer_rejects():
     schema = {"n": {"type": "integer"}}
@@ -157,9 +155,7 @@ def case_mutable_defaults_deep_copied():
     check(schema["obj"]["default"] == {"k": 1}, "不应污染 schema 里的 dict 默认值")
 
 
-# --------------------------------------------------------------------------
-# 插件作者写错 schema：加载时就该抛 SchemaError
-# --------------------------------------------------------------------------
+# ---- 插件作者写错 schema：加载时就该抛 SchemaError ----
 
 def case_config_schema_definition_errors():
     expect_schema_error(lambda: schema_mod.check_config_schema([], "p"), "必须是 dict")
@@ -295,9 +291,7 @@ def case_output_schema_errors():
     schema_mod.check_output_schema({"a": {"type": "t"}}, "p")
 
 
-# --------------------------------------------------------------------------
-# 加载时校验：临时插件把 schema 写错，Registry.load 要抛 SchemaError
-# --------------------------------------------------------------------------
+# ---- 加载时校验：临时插件把 schema 写错，Registry.load 要抛 SchemaError ----
 
 _BAD_PLUGIN_SOURCE = '''\
 from engine.api import Component

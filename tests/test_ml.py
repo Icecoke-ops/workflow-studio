@@ -14,19 +14,8 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from engine.api import PredictorModel
-from engine.registry import Registry
 
-from _harness import check, expect_raises, invoke, run_cases
-
-
-_REGISTRY = None
-
-
-def get_registry():
-    global _REGISTRY
-    if _REGISTRY is None:
-        _REGISTRY = Registry().load(ROOT / "plugins")
-    return _REGISTRY
+from _harness import check, expect_raises, get_registry, invoke, run_cases
 
 
 def training_frame():

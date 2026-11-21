@@ -13,30 +13,9 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from engine.errors import WorkflowError
-from engine.registry import Registry
 from engine.workflow import load_workflow, validate
 
-from _harness import check, expect_raises, run_cases
-
-
-_REGISTRY = None
-
-
-def get_registry():
-    global _REGISTRY
-    if _REGISTRY is None:
-        _REGISTRY = Registry().load(ROOT / "plugins")
-    return _REGISTRY
-
-
-def node(node_id, plugin, component, config=None, inputs=None):
-    return {
-        "id": node_id,
-        "plugin": plugin,
-        "component": component,
-        "config": {} if config is None else config,
-        "inputs": {} if inputs is None else inputs,
-    }
+from _harness import check, expect_raises, get_registry, node, run_cases
 
 
 def source_node(node_id, extra_config=None):

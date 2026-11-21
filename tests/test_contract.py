@@ -28,9 +28,7 @@ from _harness import check, expect_raises, run_cases, write_demo_data
 DEMO = ROOT / "workflows" / "regression_demo.json"
 
 
-# --------------------------------------------------------------------------
-# 载荷构造
-# --------------------------------------------------------------------------
+# ---- 载荷构造 ----
 
 def health_payload():
     return {"ok": True, "engine": "0.1.0", "plugins": 2, "components": 6}
@@ -99,9 +97,7 @@ def run_payload():
     return payload
 
 
-# --------------------------------------------------------------------------
-# check_health
-# --------------------------------------------------------------------------
+# ---- check_health ----
 
 def case_health_rejects():
     base = health_payload()
@@ -129,9 +125,7 @@ def case_health_rejects():
     check(check_health(base) == base, "合法 health 载荷应通过")
 
 
-# --------------------------------------------------------------------------
-# check_plugins
-# --------------------------------------------------------------------------
+# ---- check_plugins ----
 
 def case_plugins_rejects():
     base = plugins_payload()
@@ -153,9 +147,7 @@ def case_plugins_rejects():
     check(check_plugins(base) == base, "合法 plugins 载荷应通过")
 
 
-# --------------------------------------------------------------------------
-# check_validate
-# --------------------------------------------------------------------------
+# ---- check_validate ----
 
 def case_validate_rejects():
     expect_raises(ContractError, 
@@ -182,9 +174,7 @@ def case_validate_accepts():
     check(check_validate(rejected) == rejected, "校验拒绝载荷应通过")
 
 
-# --------------------------------------------------------------------------
-# check_run
-# --------------------------------------------------------------------------
+# ---- check_run ----
 
 def case_run_rejects():
     base = run_payload()
@@ -221,9 +211,7 @@ def case_run_accepts():
     check(check_run(failed) == failed, "run 失败载荷应通过")
 
 
-# --------------------------------------------------------------------------
-# 正向：真实服务返回的四个响应都能通过对应校验器
-# --------------------------------------------------------------------------
+# ---- 正向：真实服务返回的四个响应都能通过对应校验器 ----
 
 def case_real_service_payloads():
     registry = Registry().load(ROOT / "plugins")
