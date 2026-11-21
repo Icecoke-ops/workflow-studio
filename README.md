@@ -126,6 +126,8 @@ Studio 的其他参数：
 python -m studio --plugins-dir D:\workspace\space --host 127.0.0.1 --port 8765
 ```
 
+`--host` 默认只绑本机。想让局域网里的其它机器访问，要同时加 `--allow-remote`——服务没有认证，能连上端口的人都能调 `/api/run`，用组件读写本机文件。
+
 ## 工作流长什么样
 
 ```json
@@ -204,17 +206,20 @@ class MyComponent(Component):
 ## 测试
 
 ```bash
-python tests/run_all.py        # 引擎/插件/CLI 全量用例
-python tests/smoke.py          # 端到端冒烟
-python tests/studio_api.py     # Web 后端接口
-python tools/who_owns.py --audit   # 检查每个文件都有负责人
+python tests/run_all.py            # 引擎/插件/CLI 全量用例
+python tests/smoke.py              # 端到端冒烟
+python tests/test_studio_api.py    # Web 后端接口
 ```
 
-`tests/` 下 15 个文件、218 个用例。每个文件也能单独运行，例如 `python tests/test_loader.py`。
+测试只证明「已覆盖的路径没坏」。维护者在发版前另有两道只读审查（逻辑审查、减法审查），属于内部流程，不随仓库发布。
+
+每个测试文件都能单独运行，例如 `python tests/test_loader.py`。
 
 ## 开发约定
 
-文件归属写在 `docs/owners.json`，`tools/who_owns.py <路径>` 查某个文件归谁负责。接口契约（插件格式、类型规则、工作流 JSON、HTTP API）以 `docs/CONTRACT.md` 为准，改动契约要同时改文档和 `studio/contract.py` 里的校验器。
+对外行为以 **[docs/CONTRACT.md](docs/CONTRACT.md)** 为准——插件格式、类型规则、工作流 JSON、HTTP API。改动契约要同时改文档和 `studio/contract.py` 里的校验器。
+
+仓库只包含产品代码与对外文档；内部协作文档（文件归属、团队规则、本机环境）不进版本库。
 
 ## 许可证
 

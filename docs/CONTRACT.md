@@ -1,22 +1,10 @@
 # 接口契约（单一事实来源）
 
-> 由 Chief 维护。**任何人要改这里的任何一条，先找 Chief，改完同步更新本文件。**
-> 实现可以自由，契约不行。
+> 实现可以自由，契约不行。改动这里的任何一条，要同时改代码与测试。
 
 ---
 
-## 1. 文件归属
-
-**唯一事实来源是 [`docs/owners.json`](owners.json)**，这里不再抄一份表——两处维护必然漂移。
-查某个文件归谁：`python tools/who_owns.py <路径>`；查有没有无主文件：`--audit`。
-
-规则：
-- 谁都不改别人目录下的文件。
-- Reviewer、Occam 只读，不改任何文件。
-- Tester 只写测试，不改产品代码；测出 bug 报给该文件负责人。
-- 跨目录的需求先找 Chief。
-
-### 1.1 引擎边界
+## 1. 引擎边界
 
 引擎（`engine/`）必须能在脱离仓库其余部分的条件下独立运行：
 
@@ -24,8 +12,6 @@
 - **不认识 studio 和 frontend**。`engine/` 下的源码不出现、不 import 这两个目录的任何东西，也不为 studio 加任何兼容分支。依赖方向只有一个：studio → engine。
 - **插件目录可缺省**。全局目录是引擎包同级的 `plugins/`（与当前工作目录无关），缺失只警告不中断；`-p/--plugins-dir` 可重复，追加扫描任意多个目录。
 - **标准类型属于引擎**。`std_1.0@*` 五个类型和 `PredictorModel` 契约定义在 `engine/stdtypes.py`，不由任何插件提供。
-
-`tests/test_standalone.py` 固化了前两条，破坏它就会红。
 
 ---
 
@@ -44,9 +30,13 @@
 ```
 
 硬规则：
+
 - zip 顶层**恰好一个**目录，且目录名 == `PLUGIN_NAME` == zip 文件名主干
+- 插件名必须是 **`sys.path` 上查不到的**顶层名：加载前用 `PathFinder.find_spec(包名)` 检查，只要能找到 `loader` 非空的模块（磁盘上的标准库模块、已安装的第三方包）就拒绝——插件目录会进 `sys.path`，重名会顶掉全进程对它的 import。`std` 是引擎保留的命名空间，另行拒绝。内置模块（`sys`、`time` 等）不在 `sys.path` 上，`PathFinder` 查不到，因此不单独拦截；但它们的 import 由内置加载器优先解析，zip 顶不掉，不构成风险
 - **每个含 `.py` 的目录都必须有 `__init__.py`**（zipimport 不支持隐式命名空间包）
 - 源文件不能放在 zip 根目录
+
+`requirements.txt` 只检查依赖**是否已安装**。写了版本约束（如 `pandas>=2.0`）时引擎会在 stderr 提示「只检查是否安装，不校验版本」，不会因此拦住加载。
 
 同一个进程里重复加载同名插件 = **真正重载**：引擎会先清掉 `sys.modules` 里该插件包下的旧模块，再按新 zip 重新导入。所以「改了插件重新 build + load」能拿到新代码，不会复用旧类。
 
@@ -62,6 +52,8 @@ PLUGIN_VERSION = "1.0"        # \d+\.\d+
 PLUGIN_TITLE = "数据处理"
 COMPONENTS = [SelectColumns]
 ```
+
+四个常量都在加载期校验：`PLUGIN_NAME` 必须与 zip 内目录名一致、`PLUGIN_VERSION` 形如 `1.0`、`PLUGIN_TITLE` 必须是字符串（不写或空串则回退为插件名）、`COMPONENTS` 必须是非空列表。
 
 ### 2.3 组件类
 
@@ -86,6 +78,8 @@ class LoadCSV(Component):
 ```
 
 `invoke` 返回的键集合必须与 `output_schema()` 的键集合**完全相等**，多一个少一个都是执行错误。
+
+`name` / `title` / `desc` 都必须是字符串：`title` 不是字符串会在**插件加载期**报错，而不是等到 Studio 拼载荷时才炸。
 
 ---
 
@@ -155,6 +149,7 @@ class LoadCSV(Component):
 未知字段直接报错（防拼错）。
 
 补充规则：
+
 - `enum` 的候选项区分 `true` 与 `1`：`choices: [1]` 不接受 `true`
 - `min` / `max` / `step` 只允许出现在 `integer` / `number` / `array` 上，且 `min` 不能大于 `max`；违反在**插件加载时**报错
 - `list` / `dict` 类型的 `default` 会按节点深拷贝，不共享同一对象
@@ -211,7 +206,7 @@ class LoadCSV(Component):
 |---|---|
 | `workspace` | 进程启动时的工作目录（绝对路径） |
 | `engine_version` | 引擎版本 |
-| `workflow` | 本次运行的 JSON 绝对路径；Studio 下是写入 `%TEMP%\workflow-studio\` 的临时副本 |
+| `workflow` | 本次运行的 JSON 绝对路径；Studio 下是写入系统临时目录的副本 |
 | `run_id` | 本次运行标识（时间戳 + 短随机串），每跑一次都不同 |
 
 **不建议**用二级或三级覆盖上面四个值。程序不拦，但把 `workspace` 写死成某台机器的路径后，换台机器就崩。
@@ -243,9 +238,13 @@ self.path = expand_env(config["path"])   # "${workspace}/data/x.csv"
 
 `input_schema` 每项额外带 `type_labels`（短名数组），`output_schema` 每项额外带 `type_label`，供界面显示。
 
-`/api/run` 的执行期异常**不回 500**，返回 `ok:false` 并把原因写进 `errors`。
+错误口径：请求体不是 JSON 对象（解析失败、顶层不是对象、缺 `workflow`）回 400，未知路径回 404，请求体超过 16 MiB 回 413，响应体均为 `{"ok":false,"errors":[具体消息]}`。业务失败（校验不通过、执行期异常）回 200 + `ok:false`，原因进 `errors`——`/api/run` 的执行期异常**不回 500**。服务端自身**载荷违反契约**（`ContractError`，我方 bug）回 500 + 字段级消息，原样给调用方；其余**意外异常**回 500 + `{"ok":false,"errors":["服务器内部错误"]}`，完整栈只写服务端日志，不把内部路径或异常原文暴露给前端。客户端中途断开直接静默，不写响应。
 
-### 6.1 前端构建约束（踩过坑）
+### 6.1 绑定与认证
+
+`--host` 默认只绑 `127.0.0.1`。绑非回环地址必须显式加 `--allow-remote`，否则**拒绝启动**：服务没有任何认证，能连上端口的人都可以调 `/api/run`，用组件读写本机任意文件。加了该参数会在 stderr 打出警告。不要把它当多用户服务用。
+
+### 6.2 前端构建约束（踩过坑）
 
 后端静态路由是 `/static/<file>` → `studio/web/<file>`（剥掉 `/static/` 前缀后按相对路径找文件）。所以 Vite 必须构建成：
 
@@ -265,37 +264,18 @@ base: '/static/'      // 构建时生效，dev 用 '/'
 |---|---|
 | 打包插件 | `python tools/build_plugins.py` |
 | 命令行引擎 | `python -m engine run <json>` / `validate` / `plugins` |
-| 指定插件目录 | `python -m engine run --plugins-dir <dir> --plugins-dir <dir> <json>` |
+| 指定插件目录 | `python -m engine run -p <dir> --plugins-dir <dir> <json>` |
 | 指定环境变量 | `python -m engine -e DATA_DIR=D:\data -e MODEL_DIR=D:\models run <json>` |
 | 起 Web 服务 | `python -m studio --port 8765` |
+| 局域网暴露（无认证，慎用） | `python -m studio --host 0.0.0.0 --allow-remote` |
 | 构建前端 | `python tools/build_web.py` |
 | 冒烟 | `python tests/smoke.py` |
 | 全量测试 | `python tests/run_all.py` |
 
 `-p/--plugins-dir` 可重复，写在子命令前后都有效。实际扫描 = 引擎包同级的 `plugins/` + 所有指定目录，每个目录只扫一层 `*.zip`，不递归；不同目录出现同名插件直接报错，不静默覆盖。
 
-解释器统一用 `C:\Users\zh\.conda\envs\flow\python.exe`。
-
-沙箱限制：跑子进程必须走 `cmd /c "... > %TEMP%\log.txt 2>&1"` 再读日志，否则会因命名管道被拒而失败。
-
 ---
 
 ## 8. 刻意不做（别再提）
 
 单 env 隔离、沙箱、环执行、并发分支、重试、断点续跑、中间产物落盘、撤销重做、自动布局、多标签页。
-
----
-
-## 9. 不留历史包袱（硬规则）
-
-**不写兼容层。** 迁移一次改完，旧形状当场清掉。
-
-具体：
-
-- 旧类型名、旧组件、旧字段、旧配置键、旧函数签名——功能迁走的那一次改动里一起删，不留"为了兼容旧版本"的分支
-- 不为"万一还有旧文件"写兜底代码。确实要处理存量文件，写一次性转换脚本，**转换完把脚本一起删**
-- 兼容代码不是保险，是利息。今天省一次迁移，明天每次改都要照顾它
-- 注释只写**为什么**（约束、踩过的坑、非显然的取舍），不写**是什么**（代码已经说了）。迁移后过期的示例、过时的注释，一并更新或删掉
-- 不用的依赖、不用的文件、不用的导出、不用的字段，立即删
-- 测试只描述**当前设计**。迁移完成后，「某东西已删除」这类断言可以一起删——它守的是一段已经结束的历史
-- 判断标准一句话：**如果删掉它，只有"看旧代码的人"会不舒服，那就删。**
