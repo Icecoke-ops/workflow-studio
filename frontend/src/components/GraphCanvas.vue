@@ -1,18 +1,27 @@
 <script setup>
 import { markRaw, onBeforeUnmount, onMounted } from 'vue'
 import { VueFlow, useVueFlow } from '@vue-flow/core'
+import { canConnect } from '../groups.js'
 import WorkflowEdge from './WorkflowEdge.vue'
 
 const props = defineProps({
   nodeTypes: { type: Object, required: true },
+  groups: { type: Array, default: () => [] },
+  edges: { type: Array, default: () => [] },
 })
 
 const nodes = defineModel('nodes', { default: () => [] })
-const edges = defineModel('edges', { default: () => [] })
 
-const emit = defineEmits(['connect', 'drop-component'])
+const emit = defineEmits([
+  'connect',
+  'drop-component',
+  'remove-edges',
+  'selection-change',
+  'copy',
+  'paste',
+])
 
-const { fitView, screenToFlowCoordinate, getSelectedEdges, removeEdges } =
+const { fitView, screenToFlowCoordinate, getSelectedEdges, getSelectedNodes, removeSelectedElements } =
   useVueFlow()
 
 // 连线使用自定义边：中点带删除按钮，选中时高亮
@@ -30,24 +39,50 @@ function isTypingTarget(target) {
   )
 }
 
-// 自己接管 Delete/Backspace：只删选中的边，绝不连带删节点。
-// Vue Flow 原生删除会同时删掉选中的节点，所以下面把 delete-key-code 禁用。
+// 自己接管 Delete/Backspace：只把选中的边交给 App 删，绝不连带删节点。
+// Ctrl+C / Ctrl+V 也在这里截获（输入框内不动，交给浏览器）。
 function onKeydown(event) {
+  if ((event.ctrlKey || event.metaKey) && !event.altKey && !event.shiftKey) {
+    if (isTypingTarget(event.target)) return
+    const target = event.target instanceof Element ? event.target : null
+    const inCanvas = Boolean(target?.closest('.vue-flow'))
+    const hasTextSelection = Boolean(window.getSelection()?.toString())
+    if (!inCanvas && hasTextSelection) return
+    const key = event.key.toLowerCase()
+    if (key === 'c') {
+      const ids = getSelectedNodes.value.map((node) => node.id)
+      if (!ids.length) return
+      event.preventDefault()
+      emit('copy', ids)
+    } else if (key === 'v') {
+      event.preventDefault()
+      emit('paste')
+    }
+    return
+  }
   if (event.key !== 'Delete' && event.key !== 'Backspace') return
   if (event.ctrlKey || event.metaKey || event.altKey) return
   if (isTypingTarget(event.target)) return
   const selected = getSelectedEdges.value || []
   if (!selected.length) return
   event.preventDefault()
-  removeEdges(selected.map((edge) => edge.id))
+  emit('remove-edges', selected.map((edge) => edge.id))
 }
 
 onMounted(() => window.addEventListener('keydown', onKeydown))
 onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
 
+// 选择变化：多选/框选后把选中单元抛给 App 控制「组合」「解散」按钮
+function onNodesChange(changes) {
+  if (changes.some((change) => change.type === 'select')) {
+    emit('selection-change', getSelectedNodes.value.map((node) => node.id))
+  }
+}
+
 function isValidConnection(connection) {
   const { source, target, sourceHandle, targetHandle } = connection || {}
   if (!source || !target || source === target) return false
+  if (!canConnect(props.groups, source, target)) return false
   const sourceNode = nodes.value.find((node) => node.id === source)
   const targetNode = nodes.value.find((node) => node.id === target)
   if (!sourceNode || !targetNode) return false
@@ -74,14 +109,14 @@ function onDrop(event) {
   })
 }
 
-defineExpose({ fitView })
+defineExpose({ fitView, clearSelection: removeSelectedElements })
 </script>
 
 <template>
   <div class="graph" @drop="onDrop" @dragover.prevent @dragenter.prevent>
     <VueFlow
       v-model:nodes="nodes"
-      v-model:edges="edges"
+      :edges="edges"
       :node-types="props.nodeTypes"
       :edge-types="edgeTypes"
       :is-valid-connection="isValidConnection"
@@ -90,6 +125,7 @@ defineExpose({ fitView })
       :max-zoom="2"
       :delete-key-code="null"
       @connect="emit('connect', $event)"
+      @nodes-change="onNodesChange"
     />
 
     <div v-if="!nodes.length" class="graph-empty">

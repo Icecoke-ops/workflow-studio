@@ -1,6 +1,6 @@
 <script setup>
 import { computed } from 'vue'
-import { BaseEdge, EdgeLabelRenderer, getBezierPath, useVueFlow } from '@vue-flow/core'
+import { BaseEdge, EdgeLabelRenderer, getBezierPath } from '@vue-flow/core'
 
 const props = defineProps({
   id: { type: String, required: true },
@@ -13,9 +13,8 @@ const props = defineProps({
   markerEnd: { type: String, default: '' },
   style: { type: Object, default: () => ({}) },
   selected: { type: Boolean, default: false },
+  data: { type: Object, default: () => ({}) },
 })
-
-const { removeEdges } = useVueFlow()
 
 const path = computed(() =>
   getBezierPath({
@@ -50,7 +49,7 @@ const edgeStyle = computed(() => {
       title="删除连线"
       aria-label="删除连线"
       :style="{ transform: `translate(-50%, -50%) translate(${path[1]}px, ${path[2]}px)` }"
-      @click.stop="removeEdges([id])"
+      @click.stop="data.onDelete(id)"
     >
       ×
     </button>

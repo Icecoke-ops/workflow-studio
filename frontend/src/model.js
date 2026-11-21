@@ -1,6 +1,7 @@
 /** 与 Vue 运行时无关的工作流模型纯函数，可被 Node 直接 import 测试。 */
 
 import { buildAddition } from './addition.js'
+import { isComponentNode } from './groups.js'
 import { attachEnv, rowsToEnv } from './workflow.js'
 
 // schema 默认值来自后端 JSON；从 props 取出来是响应式 Proxy，
@@ -24,9 +25,13 @@ export function defaultsFor(schema) {
 
 /**
  * 编辑器状态 -> 工作流 JSON。inputs 由 edges 按 target/targetHandle 归并。
- * addition 是 readAddition(raw) 的结果（或 null），原样交给 buildAddition。
+ * 画布上的组卡片/框只影响视图，这里只导出组件节点。
+ * edges 只放真实节点之间的边；投影边只进 canvasEdges，不要传进来。
+ * addition 是 readAddition(raw) 的结果（或 null），原样交给 buildAddition；
+ * groups 是 groups.js 序列化后的条目，不传时沿用导入时读到的那份。
  */
-export function buildWorkflow({ name, nodes, edges, envRows, addition }) {
+export function buildWorkflow({ name, nodes, edges, envRows, addition, groups }) {
+  const componentNodes = nodes.filter(isComponentNode)
   const inputsByTarget = new Map()
   for (const edge of edges) {
     if (!edge.source || !edge.target || !edge.targetHandle || !edge.sourceHandle) continue
@@ -40,7 +45,7 @@ export function buildWorkflow({ name, nodes, edges, envRows, addition }) {
   const workflow = attachEnv(
     {
       name: name.trim() || '未命名工作流',
-      nodes: nodes.map((node) => ({
+      nodes: componentNodes.map((node) => ({
         id: node.id,
         plugin: node.data.plugin,
         component: node.data.component,
@@ -50,5 +55,8 @@ export function buildWorkflow({ name, nodes, edges, envRows, addition }) {
     },
     rowsToEnv(envRows),
   )
-  return { ...workflow, addition: buildAddition({ nodes, addition }) }
+  return {
+    ...workflow,
+    addition: buildAddition({ nodes: componentNodes, addition, groups }),
+  }
 }

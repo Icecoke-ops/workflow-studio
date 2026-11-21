@@ -6,12 +6,34 @@ import ComponentNode from './components/ComponentNode.vue'
 import CollapsedRail from './components/CollapsedRail.vue'
 import EnvDrawer from './components/EnvDrawer.vue'
 import GraphCanvas from './components/GraphCanvas.vue'
+import GroupFrame from './components/GroupFrame.vue'
+import GroupNode from './components/GroupNode.vue'
 import Inspector from './components/Inspector.vue'
 import Palette from './components/Palette.vue'
 import ResultPanel from './components/ResultPanel.vue'
 import { readAddition } from './addition'
 import { fetchHealth, fetchPlugins, runWorkflow, validateWorkflow } from './api'
-import { buildNodeData, planImport } from './importWorkflow'
+import { collectCopy, planPaste } from './clipboard'
+import {
+  canDissolve,
+  canGroup,
+  commonParent,
+  createGroup,
+  dissolveGroup,
+  dropEdgesForNodes,
+  groupPositions,
+  nextGroupId,
+  nodeBoxes,
+  pruneGroups,
+  projectGraph,
+  resolveConnection,
+  selectionBox,
+  selectionUnits,
+  serializeGroups,
+  setCollapsed,
+  unitBox,
+} from './groups'
+import { buildNodeData, missingNodeData, planImport } from './importWorkflow'
 import { buildWorkflow as modelBuildWorkflow } from './model'
 import { envError, envToRows } from './workflow'
 
@@ -36,6 +58,10 @@ const typeColors = ref({})
 
 const nodes = ref([])
 const edges = ref([])
+const canvasEdges = ref([])
+const groups = ref([])
+const selectedIds = ref([])
+const clipboard = ref(null)
 const workflowName = ref('未命名工作流')
 const workflowEnv = ref([])
 const additionState = ref(null)
@@ -135,7 +161,11 @@ function startResize(panel, event) {
 
 loadLayout()
 
-const nodeTypes = { comp: markRaw(ComponentNode) }
+const nodeTypes = {
+  comp: markRaw(ComponentNode),
+  group: markRaw(GroupNode),
+  frame: markRaw(GroupFrame),
+}
 
 const componentIndex = computed(() => {
   const index = new Map()
@@ -174,23 +204,162 @@ function addNode({ plugin, component, position }) {
     data: buildNodeData(entry, {}, { typeDescs: typeDescs.value, typeColors: typeColors.value }),
   }
   nodes.value = [...nodes.value, node]
+  reproject()
 }
 
 function onConnect(connection) {
-  if (!connection?.source || !connection?.target) return
-  const { source, target, sourceHandle, targetHandle } = connection
+  const real = resolveConnection(groups.value, connection)
+  if (!real || real.source === real.target) return
   const kept = edges.value.filter(
-    (edge) => !(edge.target === target && edge.targetHandle === targetHandle),
+    (edge) => !(edge.target === real.target && edge.targetHandle === real.targetHandle),
   )
   kept.push({
-    id: `e-${target}-${targetHandle}`,
+    id: `e-${real.target}-${real.targetHandle}`,
     type: 'workflow',
-    source,
-    target,
-    sourceHandle,
-    targetHandle,
+    ...real,
   })
   edges.value = kept
+  reproject()
+}
+
+// ---- 子图接线 ----------------------------------------------------------
+
+function decorateNodes(projectedNodes) {
+  return projectedNodes.map((node) => {
+    if (node.type === 'group') {
+      return {
+        ...node,
+        data: {
+          ...node.data,
+          onDissolve: dissolveOne,
+          onToggleCollapse: toggleGroupCollapsed,
+        },
+      }
+    }
+    if (node.type === 'frame') {
+      return { ...node, data: { ...node.data, onToggleCollapse: toggleGroupCollapsed } }
+    }
+    return { ...node, data: { ...node.data, onDelete: removeComponent } }
+  })
+}
+
+function decorateEdges(projectedEdges) {
+  return projectedEdges.map((edge) => ({
+    ...edge,
+    data: { onDelete: (id) => onEdgesRemoved([id]) },
+  }))
+}
+
+/** 真实节点/边/组 -> 画布三件套：组件节点（折叠时 hidden）+ 组卡片/框 + 投影边。 */
+function reproject() {
+  const projected = projectGraph({ nodes: nodes.value, edges: edges.value, groups: groups.value })
+  nodes.value = decorateNodes(projected.nodes)
+  canvasEdges.value = decorateEdges(projected.edges)
+}
+
+function removeComponent(id) {
+  nodes.value = nodes.value.filter((node) => node.id !== id)
+  edges.value = dropEdgesForNodes(edges.value, [id])
+  groups.value = pruneGroups(groups.value, nodes.value)
+  reproject()
+}
+
+function onEdgesRemoved(ids) {
+  const removed = new Set(ids)
+  const next = edges.value.filter((edge) => !removed.has(edge.id))
+  if (next.length === edges.value.length) return
+  edges.value = next
+  reproject()
+}
+
+function onSelectionChange(ids) {
+  selectedIds.value = ids
+}
+
+const groupable = computed(() => canGroup(groups.value, selectedIds.value))
+const dissolvable = computed(() => canDissolve(groups.value, selectedIds.value))
+const copyable = computed(() => selectionUnits(groups.value, selectedIds.value).length > 0)
+
+function groupSelection() {
+  const units = selectionUnits(groups.value, selectedIds.value)
+  const parent = commonParent(groups.value, units)
+  if (units.length < 2 || parent === undefined) {
+    ElMessage.warning('请先选中同一层的至少两个单元')
+    return
+  }
+  const box = selectionBox(units, groups.value, nodeBoxes(nodes.value))
+  groups.value = createGroup(groups.value, {
+    id: nextGroupId(groups.value, nodes.value),
+    title: `子图 ${groups.value.length + 1}`,
+    units,
+    parent,
+    position: box ? { x: box.x + box.width / 2, y: box.y + box.height / 2 } : null,
+  })
+  reproject()
+  graphRef.value?.clearSelection?.()
+}
+
+function dissolveSelection() {
+  if (!canDissolve(groups.value, selectedIds.value)) {
+    ElMessage.warning('请选中恰好一个子图')
+    return
+  }
+  dissolveOne(selectedIds.value[0])
+}
+
+function dissolveOne(groupId) {
+  groups.value = dissolveGroup(groups.value, groupId)
+  reproject()
+  graphRef.value?.clearSelection?.()
+}
+
+function toggleGroupCollapsed(groupId, collapsed) {
+  let position = null
+  if (collapsed) {
+    const box = unitBox(groupId, groups.value, nodeBoxes(nodes.value))
+    if (box) position = { x: box.x + box.width / 2, y: box.y + box.height / 2 }
+  }
+  groups.value = setCollapsed(groups.value, groupId, collapsed, position)
+  reproject()
+}
+
+// ---- 复制 / 粘贴 --------------------------------------------------------
+
+function copySelection(ids = selectedIds.value) {
+  const snapshot = collectCopy({
+    nodes: nodes.value,
+    edges: edges.value,
+    groups: groups.value,
+    selectedIds: ids,
+  })
+  if (!snapshot.nodes.length) {
+    ElMessage.warning('请先选中要复制的节点或子图')
+    return
+  }
+  clipboard.value = snapshot
+}
+
+function pasteClipboard() {
+  if (!clipboard.value) return
+  const plan = planPaste(clipboard.value, { nodes: nodes.value, groups: groups.value })
+  const created = plan.nodes.map((item) => {
+    const entry = componentIndex.value.get(`${item.plugin}.${item.component}`)
+    return {
+      id: item.id,
+      type: 'comp',
+      position: item.position,
+      data: entry
+        ? buildNodeData(entry, item.config, {
+            typeDescs: typeDescs.value,
+            typeColors: typeColors.value,
+          })
+        : missingNodeData(item.plugin, item.component),
+    }
+  })
+  nodes.value = [...nodes.value, ...created]
+  edges.value = [...edges.value, ...plan.edges]
+  groups.value = [...groups.value, ...plan.groups]
+  reproject()
 }
 
 // ---- 导入 / 导出 -------------------------------------------------------
@@ -202,6 +371,7 @@ function buildWorkflow() {
     edges: edges.value,
     envRows: workflowEnv.value,
     addition: additionState.value,
+    groups: serializeGroups(groups.value, groupPositions(nodes.value)),
   })
 }
 
@@ -238,6 +408,13 @@ function exportJson() {
 }
 
 async function applyWorkflow(raw) {
+  if (nodes.value.length) {
+    try {
+      await ElMessageBox.confirm('覆盖当前画布？', '导入工作流', { type: 'warning' })
+    } catch {
+      return false
+    }
+  }
   const plan = planImport(raw, {
     componentFor: (plugin, component) => componentIndex.value.get(`${plugin}.${component}`),
     typeDescs: typeDescs.value,
@@ -248,11 +425,14 @@ async function applyWorkflow(raw) {
   workflowName.value = plan.name
   importEnv(raw)
   additionState.value = addition
+  groups.value = pruneGroups(plan.groups || [], plan.nodes)
   nodes.value = plan.nodes
   edges.value = plan.edges
+  selectedIds.value = []
   validateReport.value = null
   runResult.value = null
   activeTab.value = 'validate'
+  reproject()
 
   if (addition.warning) {
     ElMessage.warning(addition.warning)
@@ -268,6 +448,7 @@ async function applyWorkflow(raw) {
 
   await nextTick()
   graphRef.value?.fitView?.({ padding: 0.2 })
+  return true
 }
 
 async function onImportFile(event) {
@@ -276,8 +457,9 @@ async function onImportFile(event) {
   if (!file) return
   try {
     const raw = JSON.parse(await file.text())
-    await applyWorkflow(raw)
-    ElMessage.success(`已导入 ${nodes.value.length} 个节点`)
+    if (await applyWorkflow(raw)) {
+      ElMessage.success(`已导入 ${nodes.value.length} 个节点`)
+    }
   } catch (err) {
     ElMessage.error(`导入失败：${err.message}`)
   }
@@ -295,6 +477,9 @@ async function newWorkflow() {
   }
   nodes.value = []
   edges.value = []
+  canvasEdges.value = []
+  groups.value = []
+  selectedIds.value = []
   workflowName.value = '未命名工作流'
   workflowEnv.value = []
   additionState.value = null
@@ -413,6 +598,10 @@ onMounted(async () => {
         运行
       </el-button>
       <el-button size="small" @click="envDrawerVisible = true">环境变量</el-button>
+      <el-button size="small" :disabled="!groupable" @click="groupSelection">组合</el-button>
+      <el-button size="small" :disabled="!dissolvable" @click="dissolveSelection">解散</el-button>
+      <el-button size="small" :disabled="!copyable" @click="copySelection()">复制</el-button>
+      <el-button size="small" :disabled="!clipboard" @click="pasteClipboard">粘贴</el-button>
 
       <div class="spacer"></div>
 
@@ -453,11 +642,16 @@ onMounted(async () => {
       <GraphCanvas
         ref="graphRef"
         v-model:nodes="nodes"
-        v-model:edges="edges"
+        :edges="canvasEdges"
+        :groups="groups"
         class="canvas"
         :node-types="nodeTypes"
         @connect="onConnect"
         @drop-component="addNode"
+        @remove-edges="onEdgesRemoved"
+        @selection-change="onSelectionChange"
+        @copy="copySelection"
+        @paste="pasteClipboard"
       />
 
       <div

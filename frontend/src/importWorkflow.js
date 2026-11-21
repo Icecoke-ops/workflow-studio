@@ -152,7 +152,9 @@ function savedPosition(value) {
 export function planImport(raw, { componentFor, typeDescs = {}, typeColors = {} } = {}) {
   const { items, skipped } = normalizeWorkflow(raw)
   const fallbackPositions = layoutPositions(items)
-  const savedPositions = readAddition(raw).positions
+  const additionInfo = readAddition(raw)
+  const savedPositions = additionInfo.positions
+  const groups = additionInfo.groups
   const created = []
   const missing = []
 
@@ -188,9 +190,18 @@ export function planImport(raw, { componentFor, typeDescs = {}, typeColors = {} 
       if (!link || typeof link !== 'object') continue
       if (typeof link.from !== 'string' || typeof link.port !== 'string') continue
       const sourceNode = nodeById.get(link.from)
-      if (!sourceNode) continue
-      if (!targetNode.data.inPorts.some((entry) => entry.name === port)) continue
-      if (!sourceNode.data.outPorts.some((entry) => entry.name === link.port)) continue
+      if (!sourceNode) {
+        skipped.push(`${item.id}.${port}: 来源节点 ${link.from} 不存在`)
+        continue
+      }
+      if (!targetNode.data.inPorts.some((entry) => entry.name === port)) {
+        skipped.push(`${item.id}.${port}: 组件没有输入端口 ${port}`)
+        continue
+      }
+      if (!sourceNode.data.outPorts.some((entry) => entry.name === link.port)) {
+        skipped.push(`${item.id}.${port}: 来源 ${link.from} 没有输出端口 ${link.port}`)
+        continue
+      }
       const key = `${item.id}.${port}`
       if (inputsTaken.has(key)) continue
       inputsTaken.add(key)
@@ -209,6 +220,7 @@ export function planImport(raw, { componentFor, typeDescs = {}, typeColors = {} 
     name: typeof raw.name === 'string' && raw.name ? raw.name : '导入的工作流',
     nodes: created,
     edges,
+    groups,
     skipped,
     missing,
   }

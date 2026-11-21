@@ -22,8 +22,9 @@ async function request(path, options = {}) {
       throw new Error(`后端返回的不是 JSON（HTTP ${res.status}）：${text.slice(0, 200)}`)
     }
   }
-  if (!res.ok && !(data && typeof data === 'object')) {
-    throw new Error(`HTTP ${res.status}`)
+  if (!res.ok) {
+    const detail = data && Array.isArray(data.errors) ? data.errors.join('；') : ''
+    throw new Error(detail || `HTTP ${res.status}`)
   }
   return data ?? {}
 }

@@ -1,6 +1,6 @@
 <script setup>
 import { computed } from 'vue'
-import { Handle, Position, useVueFlow } from '@vue-flow/core'
+import { Handle, Position } from '@vue-flow/core'
 import ConfigForm from './ConfigForm.vue'
 
 const props = defineProps({
@@ -8,8 +8,6 @@ const props = defineProps({
   data: { type: Object, required: true },
   selected: { type: Boolean, default: false },
 })
-
-const { removeNodes } = useVueFlow()
 
 const rowCount = computed(() =>
   Math.max(props.data.inPorts?.length || 0, props.data.outPorts?.length || 0),
@@ -29,7 +27,7 @@ const rowCount = computed(() =>
         title="删除节点"
         aria-label="删除节点"
         @pointerdown.stop
-        @click.stop="removeNodes([id])"
+        @click.stop="data.onDelete(id)"
       >
         ×
       </button>

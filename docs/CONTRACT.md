@@ -229,7 +229,15 @@ self.path = expand_env(config["path"])   # "${workspace}/data/x.csv"
   "client": "workflow-studio",
   "version": 1,
   "positions": {"n1": {"x": 80, "y": 60}},
-  "groups": []
+  "groups": [
+    {
+      "id": "g1",
+      "title": "子图 1",
+      "collapsed": true,
+      "position": {"x": 520, "y": 180},
+      "members": ["n1", "n2"]
+    }
+  ]
 }
 ```
 
@@ -241,7 +249,7 @@ self.path = expand_env(config["path"])   # "${workspace}/data/x.csv"
 - **保存时整块重写自己的**，不与别人的内容合并。
 - 只读路径（`validate`、`run`、预览）不写文件，因此不会破坏其它客户端写入的内容。
 - 其它顶层字段**不在此列**：写错的白名单字段仍然报「存在未知字段」，`addition` 只放行它自己。第三方客户端若要存自己的数据，应整块使用 `addition` 或向维护者提出新增顶层字段。
-- 子集约定（本编辑器当前写入的键）：`positions` 是 `{节点 id: {x, y}}`，只对 `nodes` 里存在的 id 有意义，缺的节点由编辑器自行布局；`groups` 每项至少含 `{id, title, nodes: [节点 id]}`，其余键（颜色、折叠状态等）由编辑器自定。两者都只是编辑器约定，引擎与其它客户端不解释。
+- 子集约定（本编辑器当前写入的键）：`positions` 是 `{节点 id: {x, y}}`，只对 `nodes` 里存在的 id 有意义，缺的节点由编辑器自行布局；`groups` 每项是 `{id, title, collapsed, members}`，可选 `position: {x, y}`（只在折叠时用来放卡片位置）。`members` 里放节点 id，也可以放另一个组的 id——子图可以嵌套，一个单元只属于一个组。两者都只是编辑器约定，引擎与其它客户端不解释。
 
 ---
 

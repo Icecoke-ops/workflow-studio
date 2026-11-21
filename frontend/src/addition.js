@@ -6,8 +6,26 @@ export const ADDITION_VERSION = 1
 const WARNING_FOREIGN = '此文件的附加信息由其他客户端生成'
 const WARNING_VERSION = '此文件的附加信息版本无法识别或高于当前编辑器，已忽略'
 
-function emptyResult() {
-  return { positions: {}, groups: [], warning: '', preserved: null }
+/** groups 数组的形状校验：条目必须有字符串 id；position 必须是有限坐标。 */
+function normalizeGroups(value) {
+  if (!Array.isArray(value)) return []
+  const groups = []
+  for (const entry of value) {
+    if (!entry || typeof entry !== 'object' || typeof entry.id !== 'string') continue
+    if (!('position' in entry)) {
+      groups.push(entry)
+      continue
+    }
+    const x = entry.position?.x
+    const y = entry.position?.y
+    if (Number.isFinite(x) && Number.isFinite(y)) {
+      groups.push({ ...entry, position: { x, y } })
+    } else {
+      const { position, ...rest } = entry
+      groups.push(rest)
+    }
+  }
+  return groups
 }
 
 /**
@@ -17,7 +35,9 @@ function emptyResult() {
  */
 export function readAddition(raw) {
   const addition = raw && typeof raw === 'object' ? raw.addition : null
-  if (!addition || typeof addition !== 'object' || Array.isArray(addition)) return emptyResult()
+  if (!addition || typeof addition !== 'object' || Array.isArray(addition)) {
+    return { positions: {}, groups: [], warning: '', preserved: null }
+  }
   if (addition.client !== ADDITION_CLIENT) {
     return { positions: {}, groups: [], warning: WARNING_FOREIGN, preserved: addition }
   }
@@ -30,7 +50,7 @@ export function readAddition(raw) {
       addition.positions && typeof addition.positions === 'object' && !Array.isArray(addition.positions)
         ? addition.positions
         : {},
-    groups: Array.isArray(addition.groups) ? addition.groups : [],
+    groups: normalizeGroups(addition.groups),
     warning: '',
     preserved: null,
   }
@@ -39,8 +59,9 @@ export function readAddition(raw) {
 /**
  * 从编辑器状态生成 addition。
  * addition 是 readAddition 的结果（或 null）；读不懂时原样返回 preserved（引用与键序都不动）。
+ * groups 是 groups.js 序列化后的条目；不传时沿用导入时读到的那份（保证往返不变）。
  */
-export function buildAddition({ nodes, addition }) {
+export function buildAddition({ nodes, addition, groups }) {
   if (addition && addition.preserved) return addition.preserved
   const positions = {}
   for (const node of nodes) {
@@ -52,6 +73,6 @@ export function buildAddition({ nodes, addition }) {
     client: ADDITION_CLIENT,
     version: ADDITION_VERSION,
     positions,
-    groups: addition ? addition.groups : [],
+    groups: normalizeGroups(groups !== undefined ? groups : addition ? addition.groups : []),
   }
 }
