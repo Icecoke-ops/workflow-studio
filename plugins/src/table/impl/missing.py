@@ -86,9 +86,13 @@ class FillMissing(TableIn):
                 continue
             stats = source[column]
             if self.strategy in ("mean", "median"):
-                if not pd.api.types.is_numeric_dtype(stats):
+                if not pd.api.types.is_numeric_dtype(filled):
                     raise ValueError(
-                        f"列 {column} 不是数值列，不能用 {self.strategy} 填充"
+                        f"数据列 {column} 不是数值列，不能用 {self.strategy} 填充"
+                    )
+                if reference is not None and not pd.api.types.is_numeric_dtype(stats):
+                    raise ValueError(
+                        f"参考表列 {column} 不是数值列，不能用 {self.strategy} 填充"
                     )
             if self.strategy == "mean":
                 fill = stats.mean()

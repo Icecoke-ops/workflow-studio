@@ -33,6 +33,12 @@ class ValueCounts(TableIn):
     def __init__(self, config):
         self.column = config["column"]
         self.normalize = config["normalize"]
+        output = "proportion" if self.normalize else "count"
+        if self.column == output:
+            raise ValueError(
+                f"列名与输出列名冲突：要统计的列名是 {self.column!r}，"
+                f"输出列也叫 {output!r}；请先给该列改名"
+            )
 
     def invoke(self, data):
         require_columns(data, [self.column])

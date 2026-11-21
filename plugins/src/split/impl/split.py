@@ -98,6 +98,11 @@ class SplitXY(TableIn):
     def __init__(self, config):
         self.feature = list(config["feature"])
         self.target = config["target"]
+        duplicates = sorted(
+            {column for column in self.feature if self.feature.count(column) > 1}
+        )
+        if duplicates:
+            raise ValueError(f"feature 里有重复列名：{duplicates}")
 
     def invoke(self, data):
         missing = [

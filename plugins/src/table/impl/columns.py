@@ -103,7 +103,14 @@ class RenameColumns(TableIn):
         if not isinstance(self.mapping, dict):
             raise ValueError("mapping 必须是对象（旧列名→新列名）")
         require_columns(data, list(self.mapping))
-        return {"table": data.rename(columns=self.mapping)}
+        result = data.rename(columns=self.mapping)
+        duplicated = result.columns[result.columns.duplicated()].tolist()
+        if duplicated:
+            raise ValueError(
+                f"重命名后列名重复：{duplicated}（mapping：{self.mapping}）；"
+                f"请避免改成表里已有的列名"
+            )
+        return {"table": result}
 
 
 class CastColumn(TableIn):
@@ -186,7 +193,7 @@ _FALSE = {"0", "false", "no", "n", "否"}
 def _to_bool(pd, series, errors, column):
     """数值列按 1/0、文本列按常见字面量；astype(bool) 会把 "0" 也当成 True，不能用。"""
     if pd.api.types.is_bool_dtype(series):
-        return series.astype(bool)
+        return series.astype("boolean")
     if pd.api.types.is_numeric_dtype(series):
         converted = series.map({1: True, 0: False}).astype("boolean")
     else:

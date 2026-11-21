@@ -80,7 +80,10 @@ class FilterRows(TableIn):
                     values = pd.to_datetime(dates)
                 except (TypeError, ValueError) as exc:
                     raise ValueError(f"op=in 的日期值不合法：{dates!r}（{exc}）") from exc
-                _check_datetime_tz(pd, series, getattr(values, "tz", None), dates)
+                _check_datetime_tz(
+                    pd, series, getattr(values, "tz", None), dates, allow_naive_value=True
+                )
+                values = _localize_datetime_values(pd, series, values)
             return series.isin(values)
         if self.op == "contains":
             if not isinstance(self.value, str):
@@ -298,6 +301,16 @@ def _check_datetime_tz(pd, series, value_tz, values, allow_naive_value=False):
         raise ValueError(
             f"这是带时区的日期时间列，请写带时区的日期（列时区 {column_tz}）"
         )
+
+
+def _localize_datetime_values(pd, series, values):
+    """op=in 的无时区日期按列时区解释，与 eq 拿字符串比较（能命中）对齐。"""
+    if not pd.api.types.is_datetime64_any_dtype(series):
+        return values
+    column_tz = series.dt.tz
+    if values.tz is None and column_tz is not None:
+        return values.tz_localize(column_tz)
+    return values
 
 
 

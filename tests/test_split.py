@@ -153,6 +153,31 @@ def case_split_xy_target_in_feature():
     )
 
 
+def case_split_xy_duplicate_feature():
+    exc = expect_raises(
+        ValueError,
+        lambda: invoke(
+            get_registry(),
+            "split",
+            "SplitXY",
+            {"feature": ["x", "x"], "target": "y"},
+            data=_xy_frame(),
+        ),
+        "重复",
+        "x",
+    )
+    check("feature 里有重复列名" in str(exc), f"错误信息应说明 feature 重复：{exc}")
+
+    result = invoke(
+        get_registry(),
+        "split",
+        "SplitXY",
+        {"feature": ["x"], "target": "y"},
+        data=_xy_frame(),
+    )
+    check(list(result["x"].columns) == ["x"], f"正常拆列不受影响：{list(result['x'].columns)}")
+
+
 CASES = [
     ("SplitTable 比例正确且 seed 可复现", case_split_table_proportion_and_seed),
     ("SplitTable test_size 边界在构造期报错", case_split_table_bad_test_size),
@@ -161,6 +186,7 @@ CASES = [
     ("SplitXY x / y 行对行一一对应", case_split_xy_rows_correspond),
     ("SplitXY 缺列报错并给出可用列名", case_split_xy_missing_column),
     ("SplitXY 目标列出现在特征列里报错", case_split_xy_target_in_feature),
+    ("SplitXY feature 重复列名报错", case_split_xy_duplicate_feature),
 ]
 
 

@@ -110,6 +110,25 @@ def case_cast_column_numeric_bool_invalid():
     )
 
 
+def case_cast_column_bool_nullable_keeps_na():
+    """可空布尔转 bool 要留在 boolean dtype 上，NA 不能被降级成 object。"""
+    data = pd.DataFrame({"b": pd.array([True, False, pd.NA], dtype="boolean")})
+    result = table("table", "CastColumn", {"column": "b", "to": "bool"}, data=data)
+    check(str(result["b"].dtype) == "boolean", f"dtype 应保持 boolean：{result['b'].dtype}")
+    check(bool(pd.isna(result["b"].iloc[2])), "NA 应保留")
+    check(
+        [bool(value) for value in result["b"].iloc[:2]] == [True, False],
+        f"布尔值不应被改动：{result['b'].tolist()}",
+    )
+
+    plain = pd.DataFrame({"b": [True, False]})
+    plain_result = table("table", "CastColumn", {"column": "b", "to": "bool"}, data=plain)
+    check(
+        [bool(value) for value in plain_result["b"]] == [True, False],
+        f"普通 bool 列转换后应保持真假：{plain_result['b'].tolist()}",
+    )
+
+
 # ---- FilterRows：十种 op ----
 
 def _filter_frame():
@@ -260,6 +279,41 @@ def case_fill_missing_mean_text_column():
     )
 
 
+def case_fill_missing_reference_type_errors():
+    """data 和 reference 的类型问题要分开报，别把责任推给对象。"""
+    data_text = pd.DataFrame({"v": ["x", None]})
+    reference_num = pd.DataFrame({"v": [1.0, 2.0]})
+    exc = expect_raises(
+        ValueError,
+        lambda: table(
+            "table",
+            "FillMissing",
+            {"columns": ["v"], "strategy": "mean"},
+            data=data_text,
+            reference=reference_num,
+        ),
+        "数据列",
+        "不是数值列",
+    )
+    check("参考表列" not in str(exc), f"应指出是数据列的问题：{exc}")
+
+    data_num = pd.DataFrame({"v": [1.0, np.nan]})
+    reference_text = pd.DataFrame({"v": ["x", "y"]})
+    exc = expect_raises(
+        ValueError,
+        lambda: table(
+            "table",
+            "FillMissing",
+            {"columns": ["v"], "strategy": "mean"},
+            data=data_num,
+            reference=reference_text,
+        ),
+        "参考表列",
+        "不是数值列",
+    )
+    check("数据列" not in str(exc), f"应指出是参考表列的问题：{exc}")
+
+
 def _filtered_on(data, column, op, value=None):
     config = {"column": column, "op": op}
     if value is not None:
@@ -333,6 +387,33 @@ def case_filter_datetime_aware_with_naive_string_matches():
     check(
         result["d"].iloc[0] == pd.Timestamp("2024-01-01", tz="Asia/Shanghai"),
         f"命中的行不对：{result['d'].tolist()}",
+    )
+
+
+def case_filter_datetime_in_tz_alignment():
+    """op=in 的时区口径要与 eq 对齐：带时区列 + naive 串能命中。"""
+    aware = pd.DataFrame(
+        {"d": pd.to_datetime(["2024-01-01", "2024-02-01"]).tz_localize("Asia/Shanghai")}
+    )
+    hit = _filtered_on(aware, "d", "in", '["2024-01-01"]')
+    check(len(hit) == 1, f"带时区列 in naive 串应命中 1 行：{len(hit)}")
+    check(
+        hit["d"].iloc[0] == pd.Timestamp("2024-01-01", tz="Asia/Shanghai"),
+        f"命中的行不对：{hit['d'].tolist()}",
+    )
+
+    expect_raises(
+        ValueError,
+        lambda: _filtered_on(
+            _datetime_frame(), "d", "in", '["2024-01-01T00:00:00+08:00"]'
+        ),
+        "无时区",
+        "时区",
+    )
+    check(len(_filtered_on(aware, "d", "in", "[]")) == 0, "带时区列 in [] 应返回 0 行")
+    check(
+        len(_filtered_on(aware, "d", "in", "[null]")) == 0,
+        "带时区列 in [null] 应返回 0 行",
     )
 
 
@@ -491,6 +572,22 @@ def case_rename_columns():
     check(list(result.columns) == ["A", "b"], f"改名结果不对：{list(result.columns)}")
 
 
+def case_rename_columns_collision():
+    data = pd.DataFrame({"a": [1], "b": [2]})
+    exc = expect_raises(
+        ValueError,
+        lambda: table("table", "RenameColumns", {"mapping": {"b": "a"}}, data=data),
+        "重复",
+        "a",
+    )
+    check("重命名后列名重复" in str(exc), f"错误信息应说明重名：{exc}")
+
+    swapped = table(
+        "table", "RenameColumns", {"mapping": {"a": "b", "b": "a"}}, data=data
+    )
+    check(list(swapped.columns) == ["b", "a"], f"互换列名应合法：{list(swapped.columns)}")
+
+
 def case_drop_columns():
     data = pd.DataFrame({"a": [1], "b": [2]})
     result = table("table", "DropColumns", {"columns": ["b"]}, data=data)
@@ -505,6 +602,32 @@ def case_value_counts():
     check(counts == {"a": 3, "b": 1}, f"计数结果不对：{counts}")
 
 
+def case_value_counts_column_conflict():
+    data = pd.DataFrame({"count": [1, 2], "proportion": [0.5, 0.5]})
+    exc = expect_raises(
+        ValueError,
+        lambda: table(
+            "table", "ValueCounts", {"column": "count", "normalize": False}, data=data
+        ),
+        "列名与输出列名冲突",
+        "count",
+    )
+    check("proportion" not in str(exc), f"未开占比时不应提到 proportion：{exc}")
+
+    exc = expect_raises(
+        ValueError,
+        lambda: table(
+            "table",
+            "ValueCounts",
+            {"column": "proportion", "normalize": True},
+            data=data,
+        ),
+        "列名与输出列名冲突",
+        "proportion",
+    )
+    check("'count'" not in str(exc), f"开占比时不应提到 count 输出列：{exc}")
+
+
 CASES = [
     ("SelectColumns array 写法与顺序", case_select_columns_array),
     ("SelectColumns strict 缺列报错", case_select_columns_strict_error),
@@ -513,6 +636,7 @@ CASES = [
     ('CastColumn to=bool 时 "0" 转 False', case_cast_column_bool_zero),
     ("CastColumn 数值列 1/0 转 bool，缺失保持 NA", case_cast_column_numeric_bool),
     ("CastColumn 数值列出现其他值时报错带真实值", case_cast_column_numeric_bool_invalid),
+    ("CastColumn 可空布尔保留 NA 且 dtype=boolean", case_cast_column_bool_nullable_keeps_na),
     ("FilterRows eq", case_filter_eq),
     ("FilterRows ne", case_filter_ne),
     ("FilterRows gt", case_filter_gt),
@@ -532,11 +656,13 @@ CASES = [
     ("FilterRows 无时区列带偏移串报错", case_filter_datetime_naive_with_offset_rejected),
     ("FilterRows 非法日期串报错", case_filter_datetime_invalid_date_rejected),
     ("FilterRows 带时区列与无时区串命中", case_filter_datetime_aware_with_naive_string_matches),
+    ("FilterRows datetime in 与 eq 时区口径一致", case_filter_datetime_in_tz_alignment),
     ("FillMissing mean", case_fill_missing_mean),
     ("FillMissing median", case_fill_missing_median),
     ("FillMissing mode", case_fill_missing_mode),
     ("FillMissing constant", case_fill_missing_constant),
     ("FillMissing 文本列用 mean 报错并指列名", case_fill_missing_mean_text_column),
+    ("FillMissing 区分数据列与参考表列的类型错误", case_fill_missing_reference_type_errors),
     ("FillMissing 不接 reference 用当前表统计量", case_fill_missing_no_reference_uses_data),
     ("FillMissing reference mean 取参考表", case_fill_missing_reference_mean),
     ("FillMissing reference median 取参考表", case_fill_missing_reference_median),
@@ -549,8 +675,10 @@ CASES = [
     ("SortRows 排序", case_sort_rows),
     ("HeadRows 取前 N 行", case_head_rows),
     ("RenameColumns 改名", case_rename_columns),
+    ("RenameColumns 改成已有列名报错且互换合法", case_rename_columns_collision),
     ("DropColumns 删列", case_drop_columns),
     ("ValueCounts 值计数", case_value_counts),
+    ("ValueCounts 列名与输出列名冲突报错", case_value_counts_column_conflict),
 ]
 
 
