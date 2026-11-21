@@ -261,6 +261,30 @@ def main():
         check(float(match.group(1)) > 0.95, f"r2 = {match.group(1)} > 0.95")
         check((workspace / "regression_out.csv").is_file(), "n7 按 ${workspace} 写出 CSV")
 
+        # 5.5) addition 是编辑器私有区：对象 / 字符串都不影响 validate 与 run
+        for addition in (
+            {
+                "client": "workflow-studio",
+                "version": 1,
+                "positions": {"n1": {"x": 80, "y": 60}},
+                "groups": [],
+            },
+            "editor-private-block",
+        ):
+            decorated = json.loads(json.dumps(raw))
+            decorated["addition"] = addition
+            label = type(addition).__name__
+            status, _, body = api.json("/api/validate", {"workflow": decorated})
+            check(
+                status == 200 and body["ok"] is True,
+                f"带 addition（{label}）的 validate 应通过：{body.get('errors')}",
+            )
+            status, _, body = api.json("/api/run", {"workflow": decorated})
+            check(
+                status == 200 and body["ok"] is True,
+                f"带 addition（{label}）的 run 应通过：{body.get('errors')}",
+            )
+
         # 6) 执行期异常：200 + ok:false，已完成的节点照常返回
         broken = json.loads(json.dumps(raw))
         broken["nodes"][5]["config"]["target"] = "nope"

@@ -9,6 +9,7 @@ import GraphCanvas from './components/GraphCanvas.vue'
 import Inspector from './components/Inspector.vue'
 import Palette from './components/Palette.vue'
 import ResultPanel from './components/ResultPanel.vue'
+import { readAddition } from './addition'
 import { fetchHealth, fetchPlugins, runWorkflow, validateWorkflow } from './api'
 import { buildNodeData, planImport } from './importWorkflow'
 import { buildWorkflow as modelBuildWorkflow } from './model'
@@ -37,6 +38,7 @@ const nodes = ref([])
 const edges = ref([])
 const workflowName = ref('未命名工作流')
 const workflowEnv = ref([])
+const additionState = ref(null)
 const envDrawerVisible = ref(false)
 
 const validateReport = ref(null)
@@ -199,6 +201,7 @@ function buildWorkflow() {
     nodes: nodes.value,
     edges: edges.value,
     envRows: workflowEnv.value,
+    addition: additionState.value,
   })
 }
 
@@ -240,15 +243,20 @@ async function applyWorkflow(raw) {
     typeDescs: typeDescs.value,
     typeColors: typeColors.value,
   })
+  const addition = readAddition(raw)
 
   workflowName.value = plan.name
   importEnv(raw)
+  additionState.value = addition
   nodes.value = plan.nodes
   edges.value = plan.edges
   validateReport.value = null
   runResult.value = null
   activeTab.value = 'validate'
 
+  if (addition.warning) {
+    ElMessage.warning(addition.warning)
+  }
   if (plan.missing.length) {
     ElMessage.warning(
       `有 ${plan.missing.length} 个组件未加载：${[...new Set(plan.missing)].join(', ')}`,
@@ -289,6 +297,7 @@ async function newWorkflow() {
   edges.value = []
   workflowName.value = '未命名工作流'
   workflowEnv.value = []
+  additionState.value = null
   validateReport.value = null
   runResult.value = null
   activeTab.value = 'validate'

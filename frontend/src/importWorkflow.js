@@ -1,5 +1,6 @@
 /** 导入工作流的纯逻辑：归一化、层级布局、节点与连线构造，可脱离 Vue 直接跑。 */
 
+import { readAddition } from './addition.js'
 import { defaultsFor } from './model.js'
 
 const FALLBACK_COLOR = '#909399'
@@ -140,21 +141,30 @@ export function layoutPositions(items) {
   return positions
 }
 
+/** 存档坐标必须是有限数值，否则返回 null 交给自动布局。 */
+function savedPosition(value) {
+  if (!value || typeof value !== 'object') return null
+  if (!Number.isFinite(value.x) || !Number.isFinite(value.y)) return null
+  return { x: value.x, y: value.y }
+}
+
 /** 导入计划：节点、连线、跳过的坏节点、缺失组件。 */
 export function planImport(raw, { componentFor, typeDescs = {}, typeColors = {} } = {}) {
   const { items, skipped } = normalizeWorkflow(raw)
-  const positions = layoutPositions(items)
+  const fallbackPositions = layoutPositions(items)
+  const savedPositions = readAddition(raw).positions
   const created = []
   const missing = []
 
   for (const item of items) {
+    const position = savedPosition(savedPositions[item.id]) || fallbackPositions.get(item.id)
     const entry = componentFor(item.plugin, item.component)
     if (!entry) {
       missing.push(`${item.plugin}.${item.component}`)
       created.push({
         id: item.id,
         type: 'comp',
-        position: positions.get(item.id),
+        position,
         data: missingNodeData(item.plugin, item.component),
       })
       continue
@@ -163,7 +173,7 @@ export function planImport(raw, { componentFor, typeDescs = {}, typeColors = {} 
     created.push({
       id: item.id,
       type: 'comp',
-      position: positions.get(item.id),
+      position,
       data: buildNodeData(entry, config, { typeDescs, typeColors }),
     })
   }

@@ -181,7 +181,7 @@ class LoadCSV(Component):
 }
 ```
 
-- 字段白名单：顶层 `name`/`nodes`/`env`；节点 `id`/`plugin`/`component`/`config`/`inputs`；连线 `from`/`port`。未知字段报错。
+- 字段白名单：顶层 `name`/`nodes`/`env`/`addition`（见 5.2）；节点 `id`/`plugin`/`component`/`config`/`inputs`；连线 `from`/`port`。未知字段报错。
 - **类型不写进 JSON**，只来自插件 schema。
 - 边记在输入侧；一个输入端口只能有一个来源。
 - 无输入的节点即起点，没有特殊 start 节点。
@@ -221,6 +221,27 @@ self.path = expand_env(config["path"])   # "${workspace}/data/x.csv"
 ```
 
 只认 `${NAME}` 一种写法，未定义变量抛 `ValueError`，不做静默保留。
+
+### 5.2 addition 扩展字段（编辑器私有，引擎不解释）
+
+```json
+"addition": {
+  "client": "workflow-studio",
+  "version": 1,
+  "positions": {"n1": {"x": 80, "y": 60}},
+  "groups": []
+}
+```
+
+`addition` 是**单个客户端私有的整块附加区**，用来存一切与执行无关的数据（节点坐标、编辑器分组等）。
+
+- **引擎只承认这个字段存在**：它在顶层白名单里，但引擎不解释、不校验、不修改，`addition` 是对象、字符串还是数字都不影响校验与执行。写错类型不会报错。
+- **没有命名空间隔离**：`addition` 整块属于当前客户端。换个客户端打开时它可能被整块覆盖或丢弃，这是有意的取舍——文件本身永远可用，只是布局和分组没了。
+- **靠两个字段认来源**：`client`（字符串，本编辑器是 `workflow-studio`）与 `version`（整数格式版本）。客户端遇到 `client` 不符或 `version` 高于自己支持的值，应当**整块忽略并提示**，不要报错拒绝加载，也不要去猜别人的格式。
+- **保存时整块重写自己的**，不与别人的内容合并。
+- 只读路径（`validate`、`run`、预览）不写文件，因此不会破坏其它客户端写入的内容。
+- 其它顶层字段**不在此列**：写错的白名单字段仍然报「存在未知字段」，`addition` 只放行它自己。第三方客户端若要存自己的数据，应整块使用 `addition` 或向维护者提出新增顶层字段。
+- 子集约定（本编辑器当前写入的键）：`positions` 是 `{节点 id: {x, y}}`，只对 `nodes` 里存在的 id 有意义，缺的节点由编辑器自行布局；`groups` 每项至少含 `{id, title, nodes: [节点 id]}`，其余键（颜色、折叠状态等）由编辑器自定。两者都只是编辑器约定，引擎与其它客户端不解释。
 
 ---
 

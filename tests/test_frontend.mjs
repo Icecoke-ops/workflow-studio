@@ -3,6 +3,7 @@
 
 import { envToRows, rowsToEnv, envError, attachEnv } from '../frontend/src/workflow.js'
 import { cloneDefault, defaultsFor, buildWorkflow } from '../frontend/src/model.js'
+import { readAddition } from '../frontend/src/addition.js'
 
 let failed = 0
 
@@ -532,6 +533,188 @@ addCase('planImport 缺 name 时兜底', async () => {
     planImport({ name: '', nodes: [] }, layoutOptions([])).name === '导入的工作流',
     '空 name 应兜底',
   )
+})
+
+// ---------------------------------------------------------------------------
+// addition：编辑器私有区（坐标 / 分组 + 别人的块原样保留）
+// ---------------------------------------------------------------------------
+
+function studioAddition(positions, groups = []) {
+  return { client: 'workflow-studio', version: 1, positions, groups }
+}
+
+function exportWorkflow(plan, addition) {
+  return buildWorkflow({
+    name: plan.name,
+    nodes: plan.nodes,
+    edges: plan.edges,
+    envRows: [],
+    addition,
+  })
+}
+
+function positionsOf(plan) {
+  return Object.fromEntries(plan.nodes.map((node) => [node.id, node.position]))
+}
+
+addCase('addition 导入：存档坐标优先于层级布局', async () => {
+  const { planImport } = await loadImport()
+  const saved = { n1: { x: 900, y: 700 }, n2: { x: 12, y: 34 } }
+  const raw = {
+    name: 'saved',
+    nodes: sourceNodes(),
+    addition: studioAddition(saved),
+  }
+  const plan = planImport(raw, layoutOptions([loadCsvEntry(), predictEntry()]))
+  const actual = positionsOf(plan)
+  for (const id of ['n1', 'n2']) {
+    check(
+      actual[id].x === saved[id].x && actual[id].y === saved[id].y,
+      `节点 ${id} 应使用存档坐标 ${JSON.stringify(saved[id])}，实际 ${JSON.stringify(actual[id])}`,
+    )
+  }
+})
+
+addCase('addition 往返：positions 与 groups 与导入一致', async () => {
+  const { planImport } = await loadImport()
+  const groups = [{ id: 'g1', title: '组一', nodes: ['n1', 'n2'], color: '#123456' }]
+  const raw = {
+    name: 'roundtrip',
+    nodes: sourceNodes(),
+    addition: studioAddition({ n1: { x: 900, y: 700 }, n2: { x: 12, y: 34 } }, groups),
+  }
+  const addition = readAddition(raw)
+  const plan = planImport(raw, layoutOptions([loadCsvEntry(), predictEntry()]))
+  const workflow = exportWorkflow(plan, addition)
+  assertDeepEqual(workflow.addition.positions, raw.addition.positions, '往返 positions')
+  assertDeepEqual(workflow.addition.groups, groups, '往返 groups')
+})
+
+addCase('addition 导入：部分节点缺坐标走兜底', async () => {
+  const { planImport } = await loadImport()
+  const raw = {
+    name: 'partial',
+    nodes: sourceNodes(),
+    addition: studioAddition({ n1: { x: 5, y: 6 } }),
+  }
+  const plan = planImport(raw, layoutOptions([loadCsvEntry(), predictEntry()]))
+  const actual = positionsOf(plan)
+  check(actual.n1.x === 5 && actual.n1.y === 6, `n1 应用存档坐标：${JSON.stringify(actual.n1)}`)
+  check(
+    Number.isFinite(actual.n2.x) && Number.isFinite(actual.n2.y),
+    `n2 缺坐标应走兜底：${JSON.stringify(actual.n2)}`,
+  )
+  check(
+    !(actual.n2.x === 0 && actual.n2.y === 0),
+    `兜底坐标不应是 (0, 0)：${JSON.stringify(actual.n2)}`,
+  )
+  check(
+    actual.n1.x !== actual.n2.x || actual.n1.y !== actual.n2.y,
+    `两个节点不应重叠：${JSON.stringify(actual)}`,
+  )
+})
+
+addCase('addition 导入：坏坐标走兜底且不出现 NaN', async () => {
+  const { planImport } = await loadImport()
+  const raw = {
+    name: 'badpos',
+    nodes: sourceNodes(),
+    addition: studioAddition({
+      n1: { x: 'abc', y: null },
+      n2: { x: Infinity, y: 10 },
+    }),
+  }
+  const plan = planImport(raw, layoutOptions([loadCsvEntry(), predictEntry()]))
+  for (const node of plan.nodes) {
+    check(
+      Number.isFinite(node.position?.x) && Number.isFinite(node.position?.y),
+      `节点 ${node.id} 坐标应有限：${JSON.stringify(node.position)}`,
+    )
+  }
+})
+
+addCase('addition 作者不是本客户端：忽略并原样保留', async () => {
+  const { planImport } = await loadImport()
+  const foreign = {
+    client: 'other-editor',
+    version: 7,
+    positions: { n1: { x: 1, y: 2 } },
+    extra: { b: 1, a: 2 },
+  }
+  const raw = { name: 'foreign', nodes: sourceNodes(), addition: foreign }
+  const addition = readAddition(raw)
+  check(addition.warning !== '', '别人的 addition 应给出 warning')
+  const plan = planImport(raw, layoutOptions([loadCsvEntry(), predictEntry()]))
+  check(
+    !(plan.nodes[0].position.x === 1 && plan.nodes[0].position.y === 2),
+    '别人的 positions 不应被采用',
+  )
+  const workflow = exportWorkflow(plan, addition)
+  check(workflow.addition === foreign, '导出应保留同一引用')
+  check(
+    JSON.stringify(workflow.addition) === JSON.stringify(foreign),
+    `导出应与导入的 JSON 逐字节一致：${JSON.stringify(workflow.addition)}`,
+  )
+})
+
+addCase('addition 版本高于支持值：忽略并原样保留', async () => {
+  const { planImport } = await loadImport()
+  const future = {
+    client: 'workflow-studio',
+    version: 999,
+    positions: { n1: { x: 1, y: 2 } },
+  }
+  const raw = { name: 'future', nodes: sourceNodes(), addition: future }
+  const addition = readAddition(raw)
+  check(addition.warning !== '', '高版本 addition 应给出 warning')
+  const plan = planImport(raw, layoutOptions([loadCsvEntry(), predictEntry()]))
+  check(
+    !(plan.nodes[0].position.x === 1 && plan.nodes[0].position.y === 2),
+    '高版本 addition 的 positions 不应被采用',
+  )
+  const workflow = exportWorkflow(plan, addition)
+  check(workflow.addition === future, '导出应保留同一引用')
+  check(
+    JSON.stringify(workflow.addition) === JSON.stringify(future),
+    `导出应与导入的 JSON 逐字节一致：${JSON.stringify(workflow.addition)}`,
+  )
+})
+
+addCase('addition 不是对象：忽略且导出写入自己的块', async () => {
+  const { planImport } = await loadImport()
+  for (const value of ['text', 42, []]) {
+    const raw = { name: 'notobj', nodes: sourceNodes(), addition: value }
+    const addition = readAddition(raw)
+    check(addition.warning === '', `非对象不应给 warning：${JSON.stringify(value)}`)
+    const plan = planImport(raw, layoutOptions([loadCsvEntry(), predictEntry()]))
+    const workflow = exportWorkflow(plan, addition)
+    check(
+      workflow.addition.client === 'workflow-studio' && workflow.addition.version === 1,
+      `导出应写入自己的块：${JSON.stringify(workflow.addition)}`,
+    )
+    check(
+      Boolean(workflow.addition.positions.n1) && Boolean(workflow.addition.positions.n2),
+      `导出应带上自己的 positions：${JSON.stringify(workflow.addition.positions)}`,
+    )
+    check(workflow.addition !== value, '不应把非对象值原样写回')
+  }
+})
+
+addCase('完全没有 addition：导出补上自己的 positions', async () => {
+  const { planImport } = await loadImport()
+  const raw = { name: 'plain', nodes: sourceNodes() }
+  const addition = readAddition(raw)
+  check(addition.warning === '', '没有 addition 不应给 warning')
+  const plan = planImport(raw, layoutOptions([loadCsvEntry(), predictEntry()]))
+  const workflow = exportWorkflow(plan, addition)
+  check(workflow.addition.client === 'workflow-studio', '导出应写入自己的 client')
+  check(workflow.addition.version === 1, '导出应写入支持的 version')
+  for (const node of plan.nodes) {
+    check(
+      Boolean(workflow.addition.positions[node.id]),
+      `导出应包含节点 ${node.id} 的坐标`,
+    )
+  }
 })
 
 // ---- 跑测 ----

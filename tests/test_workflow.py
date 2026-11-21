@@ -15,7 +15,7 @@ if str(ROOT) not in sys.path:
 from engine.errors import WorkflowError
 from engine.workflow import load_workflow, validate
 
-from _harness import check, expect_raises, get_registry, node, run_cases
+from _harness import check, expect_raises, get_registry, node, run_cases, run_workflow
 
 
 def source_node(node_id, extra_config=None):
@@ -366,6 +366,49 @@ def case_env_bad_value_type():
         expect_error(report, "env.A 的值必须是字符串")
 
 
+def case_addition_object_valid_and_runs():
+    """顶层 addition 是编辑器私有区：校验通过，执行也不受影响。"""
+    with tempfile.TemporaryDirectory(prefix="engine_workflow_test_") as tmp:
+        path = Path(tmp) / "data.csv"
+        path.write_text("x\n1\n2\n", encoding="utf-8")
+        raw = {
+            "name": "addition",
+            "nodes": [source_node("n1", {"path": str(path)})],
+            "addition": {
+                "client": "workflow-studio",
+                "version": 1,
+                "positions": {"n1": {"x": 80, "y": 60}},
+                "groups": [{"id": "g1", "title": "组", "nodes": ["n1"]}],
+            },
+        }
+        report = validate(get_registry(), raw)
+        check(report.ok, f"带 addition 对象应校验通过：{report.errors}")
+        results = run_workflow(get_registry(), raw)
+    check(results["n1"].outputs["table"] is not None, "带 addition 对象应能正常执行")
+
+
+def case_addition_non_object_still_valid():
+    """引擎只承认字段存在、不校验类型：字符串和数字都照样通过。"""
+    for value in ("editor-private", 42):
+        raw = {"name": "t", "nodes": [source_node("n1")], "addition": value}
+        report = validate(get_registry(), raw)
+        check(report.ok, f"addition={value!r} 不应报错：{report.errors}")
+
+
+def case_addition_typo_is_unknown():
+    raw = {"name": "t", "nodes": [source_node("n1")], "aditon": {}}
+    report = validate(get_registry(), raw)
+    expect_error(report, "未知字段", "aditon")
+
+
+def case_node_level_addition_rejected():
+    """addition 只放行顶层；节点白名单没有跟着变松。"""
+    bad = source_node("n1")
+    bad["addition"] = {"x": 1}
+    report = validate(get_registry(), {"name": "t", "nodes": [bad]})
+    expect_error(report, "未知字段", "addition")
+
+
 CASES = [
     ("regression_demo.json 校验通过且顺序正确", case_demo_valid),
     ("core.PredictModel 端口类型", case_predict_model_ports),
@@ -388,6 +431,10 @@ CASES = [
     ("env 不是对象", case_env_not_object),
     ("env 变量名不合法", case_env_bad_name),
     ("env 值必须是字符串", case_env_bad_value_type),
+    ("addition 对象通过且能执行", case_addition_object_valid_and_runs),
+    ("addition 字符串/数字也通过（不校验类型）", case_addition_non_object_still_valid),
+    ("addition 拼错仍报未知字段", case_addition_typo_is_unknown),
+    ("节点级 addition 仍报未知字段", case_node_level_addition_rejected),
     ("连线未知字段", case_edge_unknown_field),
     ("nodes 不是非空数组", case_nodes_not_list),
     ("name 不是字符串", case_name_not_string),

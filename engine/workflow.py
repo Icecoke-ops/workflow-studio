@@ -11,7 +11,7 @@ from . import schema as schema_mod
 from .env import NAME_RE
 from .errors import WorkflowError
 
-ALLOWED_TOP = {"name", "env", "nodes"}
+ALLOWED_TOP = {"name", "env", "nodes", "addition"}
 ALLOWED_NODE = {"id", "plugin", "component", "config", "inputs"}
 ALLOWED_EDGE = {"from", "port"}
 

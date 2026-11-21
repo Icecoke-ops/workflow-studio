@@ -1,5 +1,6 @@
 /** 与 Vue 运行时无关的工作流模型纯函数，可被 Node 直接 import 测试。 */
 
+import { buildAddition } from './addition.js'
 import { attachEnv, rowsToEnv } from './workflow.js'
 
 // schema 默认值来自后端 JSON；从 props 取出来是响应式 Proxy，
@@ -21,8 +22,11 @@ export function defaultsFor(schema) {
   return config
 }
 
-/** 编辑器状态 -> 工作流 JSON。inputs 由 edges 按 target/targetHandle 归并。 */
-export function buildWorkflow({ name, nodes, edges, envRows }) {
+/**
+ * 编辑器状态 -> 工作流 JSON。inputs 由 edges 按 target/targetHandle 归并。
+ * addition 是 readAddition(raw) 的结果（或 null），原样交给 buildAddition。
+ */
+export function buildWorkflow({ name, nodes, edges, envRows, addition }) {
   const inputsByTarget = new Map()
   for (const edge of edges) {
     if (!edge.source || !edge.target || !edge.targetHandle || !edge.sourceHandle) continue
@@ -33,7 +37,7 @@ export function buildWorkflow({ name, nodes, edges, envRows }) {
     }
   }
 
-  return attachEnv(
+  const workflow = attachEnv(
     {
       name: name.trim() || '未命名工作流',
       nodes: nodes.map((node) => ({
@@ -46,4 +50,5 @@ export function buildWorkflow({ name, nodes, edges, envRows }) {
     },
     rowsToEnv(envRows),
   )
+  return { ...workflow, addition: buildAddition({ nodes, addition }) }
 }
