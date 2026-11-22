@@ -8,9 +8,12 @@ import gc
 import importlib
 import json
 import os
+import socket
 import subprocess
 import sys
 import tempfile
+import threading
+import types
 import zipfile
 from pathlib import Path
 
@@ -1240,6 +1243,109 @@ def case_result_file_failed():
         check(payload["order"] == ["n1"], f"order：{payload['order']}")
 
 
+# ---------------------------------------------------------------------------
+# 官方钩子 hooks/http_debug/：accept 瞬态错误后服务仍存活（v0.5.1 回归）
+# ---------------------------------------------------------------------------
+
+
+def case_http_debug_survives_accept_error():
+    """一次 accept OSError 之后服务仍活着并能应答；修复前会 break 退出。"""
+    from hooks.http_debug import server as server_mod
+
+    real = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    real.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    real.bind(("127.0.0.1", 0))
+    real.listen()
+    port = real.getsockname()[1]
+
+    class FlakyListener:
+        """包一层真实监听 socket：第一次 accept 抛 OSError，之后转发。"""
+
+        def __init__(self, inner):
+            self.inner = inner
+            self.accept_calls = 0
+            self.injected = threading.Event()
+
+        def accept(self):
+            self.accept_calls += 1
+            if self.accept_calls == 1:
+                self.injected.set()
+                raise OSError(10054, "injected transient accept error")
+            return self.inner.accept()
+
+        def settimeout(self, value):
+            return self.inner.settimeout(value)
+
+        def getsockname(self):
+            return self.inner.getsockname()
+
+        def close(self):
+            return self.inner.close()
+
+    flaky = FlakyListener(real)
+    original_socket = server_mod.socket
+    server_mod.socket = types.SimpleNamespace(
+        create_server=lambda addr: flaky,
+        timeout=socket.timeout,
+        MSG_PEEK=socket.MSG_PEEK,
+    )
+    server = None
+    thread = None
+    try:
+        with tempfile.TemporaryDirectory(prefix="engine_hooks_accept_") as tmp:
+            server = server_mod.Server(
+                port,
+                "tok",
+                str(Path(tmp) / "hook_port"),
+                lambda connection, message: None,
+            )
+            thread = threading.Thread(target=server.run, daemon=True)
+            thread.start()
+            check(flaky.injected.wait(5), "夹具没生效：第一次 accept 没有抛 OSError")
+            check(thread.is_alive(), "一次 accept 错误后服务线程不应退出")
+
+            response = b""
+            try:
+                with socket.create_connection(("127.0.0.1", port), timeout=5) as client:
+                    client.settimeout(5)
+                    client.sendall(
+                        b"POST /nope HTTP/1.1\r\nHost: 127.0.0.1\r\n"
+                        b"Content-Length: 0\r\n\r\n"
+                    )
+                    while b"\r\n\r\n" not in response:
+                        chunk = client.recv(4096)
+                        if not chunk:
+                            break
+                        response += chunk
+            except OSError as exc:
+                raise AssertionError(
+                    f"accept 错误后服务不再接受连接（break 回归）：{exc}"
+                ) from None
+            check(
+                response.startswith(b"HTTP/1.1 404"),
+                f"应收到 HTTP 响应（不是空读/连接被拒），实际 {response!r}",
+            )
+            check(b"not found" in response, f"响应体应来自服务端：{response!r}")
+            check(thread.is_alive(), "应答之后服务线程仍应活着")
+
+            server._stop.set()
+            thread.join(timeout=5)
+            check(not thread.is_alive(), "stop 后服务线程应退出")
+            try:
+                with socket.create_connection(("127.0.0.1", port), timeout=1):
+                    still_open = True
+            except OSError:
+                still_open = False
+            check(not still_open, "stop 后监听端口应关闭")
+    finally:
+        server_mod.socket = original_socket
+        if server is not None:
+            server._stop.set()
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=5)
+        real.close()
+
+
 CASES = [
     ("事件顺序：前三个 → 建实例 → 逐节点执行 → run_end", case_event_order),
     ("每个事件的 data 键与 9.2 表一致", case_event_data_keys),
@@ -1263,6 +1369,7 @@ CASES = [
     ("result_file：成功运行的 JSON 形状符合 9.5", case_result_file_success),
     ("result_file：没设 hook_result_path 启动即失败且不开跑", case_result_file_missing_env),
     ("result_file：运行失败也写 JSON，status=failed", case_result_file_failed),
+    ("http_debug：一次 accept 错误后服务仍存活并能应答", case_http_debug_survives_accept_error),
 ]
 
 

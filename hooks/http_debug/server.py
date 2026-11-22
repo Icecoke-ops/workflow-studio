@@ -10,6 +10,7 @@ import os
 import re
 import socket
 import threading
+import time
 from urllib.parse import parse_qs, urlsplit
 
 from websockets.exceptions import ConnectionClosed
@@ -57,7 +58,12 @@ class Server:
                 except socket.timeout:
                     continue
                 except OSError:
-                    break
+                    if self._stop.is_set():
+                        break
+                    # 单次瞬态错误（对端在 accept 前 RST 等）不该结束会话；
+                    # 睡一下，持续错误（句柄耗尽）时也不会烧 CPU
+                    time.sleep(0.05)
+                    continue
                 threading.Thread(
                     target=self._handle_socket, args=(sock,), daemon=True
                 ).start()

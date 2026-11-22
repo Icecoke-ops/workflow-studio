@@ -412,7 +412,7 @@ def run(workflow, registry, on_node_done=None) -> dict[str, NodeResult]
 
 每行是 `端口 ← 来自 <来源节点>「<节点名>」，<该节点尚未执行|已执行 ✓>`；`建议`取第一个尚未执行的来源。缺输入的节点**状态保持 `unrun`**（它确实没跑过），错误记在该节点的 `error` 字段、命令级 `phase` 为 `failed`。
 
-`run_end` 的 `status`：任一节点状态是 `failed`**或 `errors` 非空**就是 `"failed"`（缺输入这类节点没开跑、只记 `errors` 的情况也算失败）；`serve` 钩子自己吞掉了异常也不例外。`error` 字段只表达「本轮被异常打断」的原因，节点级原因看 `errors`。
+`run_end` 的 `status`：本轮有执行期异常（`error` 非空）**或 `execution.errors` 非空**就是 `"failed"`（缺输入这类节点没开跑、只记 `errors` 的情况也算失败）；`serve` 钩子自己吞掉了异常也不例外。节点的每一种失败都先写进 `errors`，所以判据只看 `errors`，不再额外看 `status`；钩子不要去清 `errors`。`error` 字段只表达「本轮被异常打断」的原因，节点级原因看 `errors`。
 
 ### 9.5 官方钩子：`hooks/result_file/`
 
