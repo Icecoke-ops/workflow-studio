@@ -15,7 +15,7 @@ def _fail_write(path, exc):
 class LoadCSV(Component):
     name = "LoadCSV"
     title = "读取 CSV"
-    desc = "把 CSV 文件读成表格"
+    desc = "读取 CSV 文件并转成表格，可切换编码"
 
     @staticmethod
     def config_schema():
@@ -75,7 +75,7 @@ class LoadCSV(Component):
 class LoadJSON(Component):
     name = "LoadJSON"
     title = "读取 JSON"
-    desc = "把 records 结构的 JSON 文件读成表格"
+    desc = "读取 JSON 文件并把每条记录转成表格行"
 
     @staticmethod
     def config_schema():
@@ -103,7 +103,7 @@ class LoadJSON(Component):
 class LoadExcel(Component):
     name = "LoadExcel"
     title = "读取 Excel"
-    desc = "读取 xlsx 的一个工作表，空表名表示第一个"
+    desc = "读取 Excel 工作簿里的一张工作表并转成表格"
 
     @staticmethod
     def config_schema():
@@ -151,7 +151,7 @@ class LoadExcel(Component):
 class SaveCSV(TableIn):
     name = "SaveCSV"
     title = "保存 CSV"
-    desc = "把表格写成 CSV 文件"
+    desc = "把表格写成 CSV 文件，可切换编码"
 
     @staticmethod
     def config_schema():
@@ -195,7 +195,7 @@ class SaveCSV(TableIn):
 class SaveExcel(TableIn):
     name = "SaveExcel"
     title = "保存 Excel"
-    desc = "把表格写成一个 xlsx 工作表"
+    desc = "把表格写成 Excel 工作表，可指定表名"
 
     @staticmethod
     def config_schema():

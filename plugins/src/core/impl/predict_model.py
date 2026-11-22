@@ -9,7 +9,7 @@ from engine.api import Component
 class PredictModel(Component):
     name = "PredictModel"
     title = "通用预测"
-    desc = "用任意符合 std_1.0@model 契约的模型给数据打预测列"
+    desc = "用模型算出每行的预测值并新增一列"
 
     @staticmethod
     def config_schema():

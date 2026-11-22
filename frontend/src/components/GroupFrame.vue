@@ -1,5 +1,5 @@
 <script setup>
-import { computed } from 'vue'
+import { computed, nextTick, ref } from 'vue'
 import { useVueFlow } from '@vue-flow/core'
 import { frameItems, unionBox } from '../groups.js'
 
@@ -10,6 +10,43 @@ const props = defineProps({
 })
 
 const { findNode } = useVueFlow()
+
+// 标题就地改名：编辑态自持，提交才交给 App（data.onRename），取消直接丢弃草稿。
+const editing = ref(false)
+const draft = ref('')
+const composing = ref(false)
+const titleInput = ref(null)
+
+async function beginRename() {
+  draft.value = props.data.title || ''
+  editing.value = true
+  await nextTick()
+  titleInput.value?.focus()
+  titleInput.value?.select()
+}
+
+function onCompositionStart() {
+  composing.value = true
+}
+
+function onCompositionEnd() {
+  composing.value = false
+  // 浏览器可能先 blur 后 compositionend：组字结束后若输入框已失焦，补一次提交
+  if (editing.value && titleInput.value !== document.activeElement) commitTitle()
+}
+
+function commitTitle() {
+  if (composing.value || !editing.value) return
+  editing.value = false
+  const title = draft.value.trim()
+  if (!title || title === props.data.title) return
+  props.data.onRename?.(props.data.groupId, title)
+}
+
+function cancelTitle() {
+  if (composing.value) return
+  editing.value = false
+}
 
 // findNode 里的节点是响应式的：成员被拖动时这里自动重算，不写 watcher、不回写位置
 const box = computed(() => {
@@ -33,6 +70,7 @@ const box = computed(() => {
     <div
       v-if="box"
       class="gframe"
+      :class="{ selected }"
       :style="{
         left: box.x + 'px',
         top: box.y + 'px',
@@ -41,7 +79,25 @@ const box = computed(() => {
       }"
     >
       <div class="gframe-bar nodrag nopan" @pointerdown.stop>
-        <span class="gframe-title" :title="data.title">{{ data.title }}</span>
+        <input
+          v-if="editing"
+          ref="titleInput"
+          v-model="draft"
+          class="gframe-title gframe-title-input nodrag nopan"
+          maxlength="40"
+          @pointerdown.stop
+          @click.stop
+          @keydown.stop
+          @keydown.enter="commitTitle"
+          @keydown.esc="cancelTitle"
+          @compositionstart="onCompositionStart"
+          @compositionend="onCompositionEnd"
+          @blur="commitTitle"
+        />
+        <span v-else class="gframe-title" :title="data.title" @click.stop="beginRename">
+          {{ data.title }}
+        </span>
+        <span class="gframe-count">{{ data.count }} 项</span>
         <button
           class="gframe-btn nodrag nopan"
           type="button"
@@ -75,6 +131,12 @@ const box = computed(() => {
   background: rgba(124, 77, 255, 0.045);
 }
 
+/* 右键菜单会把展开框设成选中：框体 pointer-events:none 收不到点击，选中态只能靠这圈高亮 */
+.gframe.selected {
+  border-color: var(--primary);
+  box-shadow: 0 0 0 2px rgba(64, 158, 255, 0.22);
+}
+
 .gframe-bar {
   position: absolute;
   left: 0;
@@ -98,6 +160,28 @@ const box = computed(() => {
   max-width: 220px;
   overflow: hidden;
   text-overflow: ellipsis;
+  cursor: text;
+}
+
+.gframe-count {
+  flex: none;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.gframe-title-input {
+  width: 160px;
+  box-sizing: border-box;
+  padding: 0 4px;
+  border: 1px solid #9b7ede;
+  border-radius: 4px;
+  background: #fff;
+  color: #5e35b1;
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 16px;
+  outline: none;
 }
 
 .gframe-btn {

@@ -12,14 +12,63 @@ const props = defineProps({
 const rowCount = computed(() =>
   Math.max(props.data.inPorts?.length || 0, props.data.outPorts?.length || 0),
 )
+
+const paramCount = computed(() => Object.keys(props.data.config_schema || {}).length)
+
+// 标题行是拖动把子：pointerdown 记起点，click 里位移超过 3px 就当成拖动、不切参数。
+let pressStart = null
+
+function onTitlePress(event) {
+  pressStart = { x: event.clientX, y: event.clientY }
+}
+
+function onTitleClick(event) {
+  const start = pressStart
+  pressStart = null
+  if (start && event.detail > 0) {
+    const dx = event.clientX - start.x
+    const dy = event.clientY - start.y
+    if (dx * dx + dy * dy > 9) return
+  }
+  props.data.paramsOpen = !props.data.paramsOpen
+}
 </script>
 
 <template>
   <div class="cnode" :class="{ selected, failed: data.failed, missing: data.missing }">
     <div class="cnode-head">
       <div class="cnode-head-text">
-        <div class="cnode-title" :title="data.desc || data.title">{{ data.title }}</div>
-        <div class="cnode-meta">{{ data.plugin }}.{{ data.component }}</div>
+        <div class="cnode-title-line">
+          <button
+            class="cnode-title-row nopan"
+            type="button"
+            :aria-expanded="data.paramsOpen"
+            :disabled="data.missing"
+            @pointerdown="onTitlePress"
+            @click.stop="onTitleClick"
+          >
+            <span v-if="!data.missing" class="cnode-chevron">
+              {{ data.paramsOpen ? '▾' : '▸' }}
+            </span>
+            <span class="cnode-title" :title="data.title">{{ data.title }}</span>
+            <span v-if="paramCount" class="cnode-count">{{ paramCount }} 项</span>
+          </button>
+          <button
+            v-if="data.desc && !data.missing"
+            class="cnode-info nodrag nopan"
+            :class="{ active: data.descOpen }"
+            type="button"
+            title="组件简介"
+            aria-label="组件简介"
+            :aria-expanded="Boolean(data.descOpen)"
+            @pointerdown.stop
+            @click.stop="data.descOpen = !data.descOpen"
+          >
+            ⓘ
+          </button>
+        </div>
+        <div v-if="!data.missing" class="cnode-meta">{{ data.plugin }}.{{ data.component }}</div>
+        <div v-if="data.descOpen && data.desc" class="cnode-desc">{{ data.desc }}</div>
       </div>
       <button
         class="cnode-delete nodrag nopan"
@@ -93,38 +142,12 @@ const rowCount = computed(() =>
 
       <div v-if="data.missing" class="cnode-empty error">组件未加载</div>
       <div
-        v-else
+        v-else-if="data.paramsOpen"
         class="cnode-scroll nodrag nopan nowheel"
         @pointerdown.stop
         @wheel.stop
       >
-        <div class="cnode-section">
-          <button
-            class="collapse-toggle nodrag nopan"
-            type="button"
-            @pointerdown.stop
-            @click.stop="data.descOpen = !data.descOpen"
-          >
-            <span class="collapse-chevron">{{ data.descOpen ? '▾' : '▸' }}</span>
-            <span>组件介绍</span>
-          </button>
-          <div v-if="data.descOpen" class="cnode-section-body">
-            <div v-if="data.desc">{{ data.desc }}</div>
-            <div v-else class="muted">（无介绍）</div>
-            <div
-              v-if="data.pluginTitle && data.pluginTitle !== data.title"
-              class="cnode-plugin-title"
-            >
-              所属插件：{{ data.pluginTitle }}
-            </div>
-          </div>
-        </div>
-
-        <ConfigForm
-          v-model:open="data.paramsOpen"
-          :schema="data.config_schema"
-          :config="data.config"
-        />
+        <ConfigForm :header="false" :schema="data.config_schema" :config="data.config" />
       </div>
     </div>
 
@@ -176,22 +199,95 @@ const rowCount = computed(() =>
   min-width: 0;
 }
 
-.cnode-title {
-  font-weight: 600;
+.cnode-title-line {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.cnode-title-row {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  align-items: center;
+  gap: 5px;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--text);
+  font-family: inherit;
   font-size: 13px;
+  font-weight: 600;
   line-height: 18px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.cnode-title-row:disabled {
+  cursor: default;
+}
+
+.cnode-chevron {
+  flex: none;
+  width: 10px;
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 14px;
+  text-align: center;
+}
+
+.cnode-title {
+  flex: 1;
+  min-width: 0;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 
+.cnode-count {
+  flex: none;
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 400;
+}
+
+.cnode-info {
+  flex: none;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 18px;
+  cursor: pointer;
+}
+
+.cnode-info:hover,
+.cnode-info.active {
+  color: var(--primary);
+  background: #ecf5ff;
+}
+
 .cnode-meta {
+  padding-left: 15px;
   color: var(--muted);
   font-size: 11px;
   line-height: 15px;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+.cnode-desc {
+  margin-top: 2px;
+  padding-left: 15px;
+  color: var(--text-2);
+  font-size: 11px;
+  line-height: 16px;
+  word-break: break-word;
 }
 
 .cnode-delete {
@@ -276,22 +372,6 @@ const rowCount = computed(() =>
   min-height: 0;
   overflow: auto;
   margin-top: 4px;
-  padding-top: 2px;
-  border-top: 1px solid #f0f2f5;
-}
-
-.cnode-section-body {
-  padding: 2px 4px 5px 17px;
-  color: var(--text-2);
-  font-size: 11px;
-  line-height: 16px;
-  word-break: break-word;
-}
-
-.cnode-plugin-title {
-  margin-top: 3px;
-  color: var(--muted);
-  font-size: 10px;
 }
 
 .cnode-empty {

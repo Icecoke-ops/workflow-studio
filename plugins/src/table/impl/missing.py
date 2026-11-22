@@ -7,10 +7,7 @@ from table.impl.checks import parse_json_value, require_columns
 class FillMissing(TableIn):
     name = "FillMissing"
     title = "填充缺失值"
-    desc = (
-        "按均值 / 中位数 / 众数 / 常量填充空值；接上参考表时统计量取自它（例如训练集），"
-        "不接时统计量在当前表上计算——建模请把训练集接到 reference，否则测试集会参与统计"
-    )
+    desc = "补上空值，统计量在当前表上计算或取自参考表"
 
     @staticmethod
     def config_schema():
@@ -48,7 +45,8 @@ class FillMissing(TableIn):
                 "types": ["std_1.0@table"],
                 "required": False,
                 "title": "参考表",
-                "desc": "统计量取自这张表（例如训练集）；不接则用 data 自己算",
+                "desc": "统计量取自这张表；不接时用当前数据算，测试集会参与统计，"
+                "建模请把训练集接进来",
             },
         }
 
@@ -110,7 +108,7 @@ class FillMissing(TableIn):
 class DropMissing(TableIn):
     name = "DropMissing"
     title = "删除缺失行"
-    desc = "删掉含缺失值的行"
+    desc = "删掉含空值的行，可按全部列或任一列判断"
 
     @staticmethod
     def config_schema():

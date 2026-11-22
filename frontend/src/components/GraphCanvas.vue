@@ -1,12 +1,10 @@
 <script setup>
-import { markRaw, onBeforeUnmount, onMounted } from 'vue'
+import { markRaw, onBeforeUnmount, onMounted, watch } from 'vue'
 import { VueFlow, useVueFlow } from '@vue-flow/core'
-import { canConnect } from '../groups.js'
 import WorkflowEdge from './WorkflowEdge.vue'
 
 const props = defineProps({
   nodeTypes: { type: Object, required: true },
-  groups: { type: Array, default: () => [] },
   edges: { type: Array, default: () => [] },
 })
 
@@ -19,23 +17,29 @@ const emit = defineEmits([
   'selection-change',
   'copy',
   'paste',
+  'context-menu',
 ])
 
-const { fitView, screenToFlowCoordinate, getSelectedEdges, getSelectedNodes, removeSelectedElements } =
-  useVueFlow()
+const {
+  addSelectedNodes,
+  fitView,
+  getNodes,
+  screenToFlowCoordinate,
+  getSelectedEdges,
+  getSelectedNodes,
+  removeSelectedElements,
+} = useVueFlow()
 
 // 连线使用自定义边：中点带删除按钮，选中时高亮
 const edgeTypes = { workflow: markRaw(WorkflowEdge) }
 
+// 输入类控件（含 contenteditable）：键盘快捷键和右键都让位给浏览器/原生控件。
 function isTypingTarget(target) {
   const element = target instanceof Element ? target : null
   if (!element) return false
-  const tag = element.tagName.toLowerCase()
-  return (
-    tag === 'input' ||
-    tag === 'textarea' ||
-    tag === 'select' ||
-    element.isContentEditable
+  if (element.isContentEditable) return true
+  return Boolean(
+    element.closest('input, textarea, select, [contenteditable]:not([contenteditable="false"])'),
   )
 }
 
@@ -44,12 +48,10 @@ function isTypingTarget(target) {
 function onKeydown(event) {
   if ((event.ctrlKey || event.metaKey) && !event.altKey && !event.shiftKey) {
     if (isTypingTarget(event.target)) return
-    const target = event.target instanceof Element ? event.target : null
-    const inCanvas = Boolean(target?.closest('.vue-flow'))
-    const hasTextSelection = Boolean(window.getSelection()?.toString())
-    if (!inCanvas && hasTextSelection) return
     const key = event.key.toLowerCase()
     if (key === 'c') {
+      // 有文字选中时放行，交给浏览器复制文字；没有选中文字才复制节点
+      if (window.getSelection()?.toString()) return
       const ids = getSelectedNodes.value.map((node) => node.id)
       if (!ids.length) return
       event.preventDefault()
@@ -72,24 +74,17 @@ function onKeydown(event) {
 onMounted(() => window.addEventListener('keydown', onKeydown))
 onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
 
-// 选择变化：多选/框选后把选中单元抛给 App 控制「组合」「解散」按钮
-function onNodesChange(changes) {
-  if (changes.some((change) => change.type === 'select')) {
-    emit('selection-change', getSelectedNodes.value.map((node) => node.id))
-  }
-}
-
-function isValidConnection(connection) {
-  const { source, target, sourceHandle, targetHandle } = connection || {}
-  if (!source || !target || source === target) return false
-  if (!canConnect(props.groups, source, target)) return false
-  const sourceNode = nodes.value.find((node) => node.id === source)
-  const targetNode = nodes.value.find((node) => node.id === target)
-  if (!sourceNode || !targetNode) return false
-  const output = (sourceNode.data?.outPorts || []).find((port) => port.name === sourceHandle)
-  const input = (targetNode.data?.inPorts || []).find((port) => port.name === targetHandle)
-  return Boolean(output && input && input.types.includes(output.type))
-}
+// 选择变化：把选中单元抛给 App（右键菜单的组合判定、复制、删除后的收敛都读它）。
+// getSelectedNodes 是 computed，选中标记一变就重算；computed 每次返回新数组，
+// 所以按 id 串去重，拖动等无关重算不重复 emit。
+let lastIds = ''
+watch(getSelectedNodes, (list) => {
+  const ids = list.map((node) => node.id)
+  const key = ids.join('\u0000')
+  if (key === lastIds) return
+  lastIds = key
+  emit('selection-change', ids)
+})
 
 function onDrop(event) {
   event.preventDefault()
@@ -109,23 +104,53 @@ function onDrop(event) {
   })
 }
 
-defineExpose({ fitView, clearSelection: removeSelectedElements })
+// 右键：输入类控件上不接管（参数表单里要复制粘贴文本），其余落点交给 App 决定菜单项。
+function onContextMenu(event) {
+  const target = event.target instanceof Element ? event.target : null
+  if (isTypingTarget(target)) return
+  event.preventDefault()
+  // 连线没有菜单项，但原生菜单也不该冒出来
+  if (target?.closest('.vue-flow__edge')) {
+    emit('context-menu', null)
+    return
+  }
+  const nodeEl = target?.closest('.vue-flow__node')
+  emit('context-menu', {
+    x: event.clientX,
+    y: event.clientY,
+    nodeId: nodeEl?.getAttribute('data-id') || null,
+  })
+}
+
+/** 右键落点先成为唯一选中：清掉全部节点与边的选中，再选中给定节点。 */
+function selectOnly(ids) {
+  removeSelectedElements()
+  const wanted = new Set(ids)
+  const picked = getNodes.value.filter((node) => wanted.has(node.id))
+  if (picked.length) addSelectedNodes(picked)
+}
+
+defineExpose({ fitView, clearSelection: removeSelectedElements, selectOnly })
 </script>
 
 <template>
-  <div class="graph" @drop="onDrop" @dragover.prevent @dragenter.prevent>
+  <div
+    class="graph"
+    @drop="onDrop"
+    @dragover.prevent
+    @dragenter.prevent
+    @contextmenu.capture="onContextMenu"
+  >
     <VueFlow
       v-model:nodes="nodes"
       :edges="edges"
       :node-types="props.nodeTypes"
       :edge-types="edgeTypes"
-      :is-valid-connection="isValidConnection"
       :fit-view-on-init="true"
       :min-zoom="0.2"
       :max-zoom="2"
       :delete-key-code="null"
       @connect="emit('connect', $event)"
-      @nodes-change="onNodesChange"
     />
 
     <div v-if="!nodes.length" class="graph-empty">

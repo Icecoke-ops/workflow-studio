@@ -4,6 +4,7 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 
 import ComponentNode from './components/ComponentNode.vue'
 import CollapsedRail from './components/CollapsedRail.vue'
+import ContextMenu from './components/ContextMenu.vue'
 import EnvDrawer from './components/EnvDrawer.vue'
 import GraphCanvas from './components/GraphCanvas.vue'
 import GroupFrame from './components/GroupFrame.vue'
@@ -15,18 +16,20 @@ import { readAddition } from './addition'
 import { fetchHealth, fetchPlugins, runWorkflow, validateWorkflow } from './api'
 import { collectCopy, planPaste } from './clipboard'
 import {
-  canDissolve,
   canGroup,
   commonParent,
+  connectionAllowed,
   createGroup,
   dissolveGroup,
   dropEdgesForNodes,
   groupPositions,
+  isComponentNode,
+  memberLeaves,
   nextGroupId,
   nodeBoxes,
   pruneGroups,
   projectGraph,
-  resolveConnection,
+  renameGroup,
   selectionBox,
   selectionUnits,
   serializeGroups,
@@ -62,6 +65,7 @@ const canvasEdges = ref([])
 const groups = ref([])
 const selectedIds = ref([])
 const clipboard = ref(null)
+const contextMenu = ref(null)
 const workflowName = ref('未命名工作流')
 const workflowEnv = ref([])
 const additionState = ref(null)
@@ -83,7 +87,7 @@ const LAYOUT_KEY = 'workflow-studio:layout'
 
 const layout = ref({
   leftOpen: true,
-  rightOpen: true,
+  rightOpen: false,
   bottomOpen: true,
   leftWidth: 248,
   rightWidth: 320,
@@ -208,8 +212,12 @@ function addNode({ plugin, component, position }) {
 }
 
 function onConnect(connection) {
-  const real = resolveConnection(groups.value, connection)
-  if (!real || real.source === real.target) return
+  // 新连线只校验「两端不是同一可见实体」+ 端口类型兼容，不按层级拒绝。
+  // 跨子图边界的连线必须放行：折叠组的跨组边就是这样产生的。
+  // 校验只作用于用户新拉的线；不能交给 Vue Flow 的 isValidConnection prop，
+  // 那会对每一条模型边重审，导入/投影边会被误杀。
+  const real = connectionAllowed(nodes.value, groups.value, connection)
+  if (!real) return
   const kept = edges.value.filter(
     (edge) => !(edge.target === real.target && edge.targetHandle === real.targetHandle),
   )
@@ -231,13 +239,17 @@ function decorateNodes(projectedNodes) {
         ...node,
         data: {
           ...node.data,
-          onDissolve: dissolveOne,
+          onDeleteSubgraph: deleteSubgraph,
           onToggleCollapse: toggleGroupCollapsed,
+          onRename: renameOne,
         },
       }
     }
     if (node.type === 'frame') {
-      return { ...node, data: { ...node.data, onToggleCollapse: toggleGroupCollapsed } }
+      return {
+        ...node,
+        data: { ...node.data, onToggleCollapse: toggleGroupCollapsed, onRename: renameOne },
+      }
     }
     return { ...node, data: { ...node.data, onDelete: removeComponent } }
   })
@@ -276,10 +288,6 @@ function onSelectionChange(ids) {
   selectedIds.value = ids
 }
 
-const groupable = computed(() => canGroup(groups.value, selectedIds.value))
-const dissolvable = computed(() => canDissolve(groups.value, selectedIds.value))
-const copyable = computed(() => selectionUnits(groups.value, selectedIds.value).length > 0)
-
 function groupSelection() {
   const units = selectionUnits(groups.value, selectedIds.value)
   const parent = commonParent(groups.value, units)
@@ -299,18 +307,34 @@ function groupSelection() {
   graphRef.value?.clearSelection?.()
 }
 
-function dissolveSelection() {
-  if (!canDissolve(groups.value, selectedIds.value)) {
-    ElMessage.warning('请选中恰好一个子图')
-    return
-  }
-  dissolveOne(selectedIds.value[0])
-}
-
 function dissolveOne(groupId) {
   groups.value = dissolveGroup(groups.value, groupId)
   reproject()
   graphRef.value?.clearSelection?.()
+}
+
+/** 删除整棵子图：叶子组件、相关边、该组和全部嵌套组一起删，父组交给 pruneGroups 收敛。 */
+async function deleteSubgraph(groupId) {
+  const group = groups.value.find((item) => item.id === groupId)
+  if (!group) return
+  // 先按实际要删的集合取数：members 里有重复 id 时 leaf 条数会比去重后的节点数多
+  const doomedNodes = new Set(memberLeaves(groups.value, groupId).map((leaf) => leaf.nodeId))
+  try {
+    await ElMessageBox.confirm(
+      `将删除「${group.title}」及其中 ${doomedNodes.size} 个组件，无法撤销`,
+      '删除子图',
+      { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消' },
+    )
+  } catch {
+    return
+  }
+  nodes.value = nodes.value.filter((node) => !doomedNodes.has(node.id))
+  edges.value = dropEdgesForNodes(edges.value, [...doomedNodes])
+  groups.value = pruneGroups(groups.value, nodes.value)
+  reproject()
+  // 子树随 prune 消失：选中集合里已不存在的节点/组 id 统一清掉（保留的是确定收敛，不赌 watch 时序）
+  const alive = new Set(nodes.value.map((node) => node.id))
+  selectedIds.value = selectedIds.value.filter((id) => alive.has(id))
 }
 
 function toggleGroupCollapsed(groupId, collapsed) {
@@ -321,6 +345,56 @@ function toggleGroupCollapsed(groupId, collapsed) {
   }
   groups.value = setCollapsed(groups.value, groupId, collapsed, position)
   reproject()
+}
+
+function renameOne(groupId, title) {
+  groups.value = renameGroup(groups.value, groupId, title)
+  reproject()
+}
+
+// ---- 右键菜单 ----------------------------------------------------------
+
+let menuSeq = 0
+
+/** 画布右键落点 -> 菜单项（每项自带动作，点击即执行）。 */
+function onCanvasContextMenu(payload) {
+  if (!payload) {
+    contextMenu.value = null
+    return
+  }
+  const { x, y, nodeId } = payload
+  const node = nodeId ? nodes.value.find((item) => item.id === nodeId) : null
+  if (!node) {
+    contextMenu.value = {
+      id: ++menuSeq,
+      x,
+      y,
+      items: [{ label: '粘贴', disabled: !clipboard.value, action: () => pasteClipboard() }],
+    }
+    return
+  }
+
+  // 右键未选中的单元 -> 先把它设成唯一选中；已在选中集合里 -> 保留多选（组合才够得着）
+  const unit = selectionUnits(groups.value, [node.id])[0]
+  const selectedUnits = selectionUnits(groups.value, selectedIds.value)
+  const keepSelection = selectedUnits.includes(unit)
+  if (!keepSelection) graphRef.value?.selectOnly?.([node.id])
+  const units = keepSelection ? selectedUnits : [unit]
+  const ids = keepSelection ? selectedIds.value : [node.id]
+
+  const items = [{ label: '复制', action: () => copySelection(ids) }]
+  if (!isComponentNode(node)) {
+    items.push({ label: '解散子图', action: () => dissolveOne(unit) })
+    items.push({ label: '删除子图', danger: true, action: () => deleteSubgraph(unit) })
+  }
+  if (canGroup(groups.value, units)) items.push({ label: '组合', action: () => groupSelection() })
+
+  contextMenu.value = { id: ++menuSeq, x, y, items }
+}
+
+function onMenuSelect(item) {
+  contextMenu.value = null
+  item.action()
 }
 
 // ---- 复制 / 粘贴 --------------------------------------------------------
@@ -437,6 +511,11 @@ async function applyWorkflow(raw) {
   if (addition.warning) {
     ElMessage.warning(addition.warning)
   }
+  if (plan.droppedGroups) {
+    ElMessage.warning(
+      `导入时忽略 ${plan.droppedGroups} 个子图分组（id 为空、重复或与节点冲突）`,
+    )
+  }
   if (plan.missing.length) {
     ElMessage.warning(
       `有 ${plan.missing.length} 个组件未加载：${[...new Set(plan.missing)].join(', ')}`,
@@ -447,6 +526,10 @@ async function applyWorkflow(raw) {
   }
 
   await nextTick()
+  // 导入会复用同 id 的 Vue Flow 节点对象，旧的 selected 标记被 Object.assign 留下；
+  // 而 selection watch 的去重键没变、不会再通知 App，所以这里显式清一次选中态
+  // （不传参 = 取消全部节点与边的选中）。
+  graphRef.value?.clearSelection?.()
   graphRef.value?.fitView?.({ padding: 0.2 })
   return true
 }
@@ -458,7 +541,7 @@ async function onImportFile(event) {
   try {
     const raw = JSON.parse(await file.text())
     if (await applyWorkflow(raw)) {
-      ElMessage.success(`已导入 ${nodes.value.length} 个节点`)
+      ElMessage.success(`已导入 ${nodes.value.filter(isComponentNode).length} 个节点`)
     }
   } catch (err) {
     ElMessage.error(`导入失败：${err.message}`)
@@ -598,10 +681,6 @@ onMounted(async () => {
         运行
       </el-button>
       <el-button size="small" @click="envDrawerVisible = true">环境变量</el-button>
-      <el-button size="small" :disabled="!groupable" @click="groupSelection">组合</el-button>
-      <el-button size="small" :disabled="!dissolvable" @click="dissolveSelection">解散</el-button>
-      <el-button size="small" :disabled="!copyable" @click="copySelection()">复制</el-button>
-      <el-button size="small" :disabled="!clipboard" @click="pasteClipboard">粘贴</el-button>
 
       <div class="spacer"></div>
 
@@ -643,7 +722,6 @@ onMounted(async () => {
         ref="graphRef"
         v-model:nodes="nodes"
         :edges="canvasEdges"
-        :groups="groups"
         class="canvas"
         :node-types="nodeTypes"
         @connect="onConnect"
@@ -652,6 +730,7 @@ onMounted(async () => {
         @selection-change="onSelectionChange"
         @copy="copySelection"
         @paste="pasteClipboard"
+        @context-menu="onCanvasContextMenu"
       />
 
       <div
@@ -695,6 +774,16 @@ onMounted(async () => {
     />
 
     <EnvDrawer v-model:visible="envDrawerVisible" v-model:rows="workflowEnv" />
+
+    <ContextMenu
+      v-if="contextMenu"
+      :key="contextMenu.id"
+      :x="contextMenu.x"
+      :y="contextMenu.y"
+      :items="contextMenu.items"
+      @select="onMenuSelect"
+      @close="contextMenu = null"
+    />
   </div>
 </template>
 

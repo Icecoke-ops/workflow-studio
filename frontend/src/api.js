@@ -62,7 +62,7 @@ function normalizePlugins(data) {
       for (const spec of Object.values(component.output_schema || {})) {
         if (spec.type && spec.type_label) typeLabels[spec.type] = spec.type_label
       }
-      return { plugin: plugin.name, pluginTitle: plugin.title || '', ...component }
+      return { plugin: plugin.name, ...component }
     })
 
     return { ...plugin, components }

@@ -29,22 +29,47 @@ _REQ_SPLIT = re.compile(r"[<>=!~\[; ]")
 
 DEFAULT_DIR = Path(__file__).resolve().parent.parent / "plugins"
 
-# importlib.metadata 每次查询都会扫一遍 sys.path（包括所有插件 zip），
-# 按发行名缓存一下，N 个插件 × M 个依赖不要重复扫。
-# ponytail: 扫描会留下未关闭的 ZipFile 句柄，进程退出才释放；Windows 上 reload
-#           后删旧 zip 可能失败。真要热卸载插件，再引入显式句柄回收。
+# importlib.metadata 每次查询都会扫一遍 sys.path，按发行名缓存一次结果。
+# 查询时必须排除已挂载的插件 zip：CPython 3.12 的 FastPath 会为 zip 路径缓存
+# 打开的 ZipFile（进程内不释放），Windows 上表现为插件 zip 被锁住、无法重建。
 _INSTALLED = {}
+_SCANNED = False
+_SCAN_FAILED = False
+
+
+def _dist_key(name):
+    return re.sub(r"[-_.]+", "-", name).lower()
+
+
+def _scan_installed():
+    """一次性索引已安装的发行版，只扫非插件路径（原因见上）。
+
+    METADATA 里没有 Name 的畸形发行版直接跳过：pip 装的必然带 Name，
+    不为人为构造的输入加兜底。
+    """
+    global _SCANNED, _SCAN_FAILED
+    paths = [p for p in sys.path if isinstance(p, str) and p not in _MOUNTED]
+    try:
+        for candidate in importlib.metadata.distributions(path=paths):
+            try:
+                name = candidate.metadata["Name"]
+                if name:
+                    _INSTALLED.setdefault(_dist_key(name), candidate.version)
+            except Exception:
+                continue
+    except Exception as exc:
+        # 失败不标记已扫描，下次调用重试；警告只打一次。
+        if not _SCAN_FAILED:
+            _SCAN_FAILED = True
+            print(f"[警告] 依赖清单扫描失败：{exc}", file=sys.stderr)
+        return
+    _SCANNED = True
 
 
 def _installed_version(dist):
-    key = dist.lower()
-    if key in _INSTALLED:
-        return _INSTALLED[key]
-    try:
-        _INSTALLED[key] = importlib.metadata.version(dist)
-    except Exception:
-        _INSTALLED[key] = None
-    return _INSTALLED[key]
+    if not _SCANNED:
+        _scan_installed()
+    return _INSTALLED.get(_dist_key(dist))
 
 
 @dataclass

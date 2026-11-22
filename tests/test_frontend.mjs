@@ -7,10 +7,9 @@ import { readAddition } from '../frontend/src/addition.js'
 import {
   isComponentNode,
   parentOf,
-  collapsedAncestor,
-  canConnect,
   parseHandle,
   resolveConnection,
+  connectionAllowed,
   projectEdges,
   projectGraph,
   frameItems,
@@ -18,11 +17,11 @@ import {
   selectionUnits,
   commonParent,
   canGroup,
-  canDissolve,
   nextGroupId,
   createGroup,
   dissolveGroup,
   setCollapsed,
+  renameGroup,
   pruneGroups,
   dropEdgesForNodes,
   nodeBoxes,
@@ -788,33 +787,6 @@ addCase('isComponentNode 只把非组节点当组件', () => {
   check(isComponentNode({}) === true, '未标 type 按组件处理')
 })
 
-addCase('collapsedAncestor 取最近折叠祖先且环上有界', () => {
-  const chain = [
-    grp('outer', ['inner'], { collapsed: true }),
-    grp('inner', ['n1'], { collapsed: true }),
-  ]
-  check(collapsedAncestor(chain, 'n1') === 'inner', '应取最近的折叠祖先 inner')
-  check(collapsedAncestor(chain, 'inner') === 'outer', 'inner 自身的折叠祖先是 outer')
-  const onlyOuter = [grp('outer', ['inner'], { collapsed: true }), grp('inner', ['n1'])]
-  check(collapsedAncestor(onlyOuter, 'n1') === 'outer', 'inner 未折叠时应继续向上找')
-
-  const cycle = [
-    grp('A', ['B'], { collapsed: true }),
-    grp('B', ['A']),
-  ]
-  const result = collapsedAncestor(cycle, 'A')
-  check(result === 'A', `畸形环应返回有界结果（实际 ${JSON.stringify(result)}）`)
-})
-
-addCase('canConnect 只放行同层且非自身', () => {
-  const groups = [grp('g1', ['n1'], { collapsed: true })]
-  check(canConnect(groups, 'n3', 'n4') === true, 'root 层两个节点应允许')
-  check(canConnect(groups, 'n1', 'n2') === false, '折叠组内节点与组外节点不能连')
-  check(canConnect(groups, 'n1', 'n1') === false, '同一个 id 不能连')
-  check(canConnect(groups, 'g1', 'n2') === true, '组卡片按父层参与连线')
-  check(canConnect(groups, 'n1', 'g1') === false, '组内节点与组卡片不同层')
-})
-
 addCase('parseHandle 解析与非法输入', () => {
   assertDeepEqual(parseHandle('n1:data'), { nodeId: 'n1', port: 'data' }, 'parseHandle 正常')
   for (const bad of ['n1', ':x', 'n1:', 123, null, undefined]) {
@@ -897,13 +869,164 @@ addCase('projectGraph 折叠组：隐藏成员、组卡片端口去重', () => {
   check(byId.g1.data.count === 1, '卡片应带成员数')
   assertDeepEqual(
     byId.g1.data.outPorts,
-    [{ name: 'n1:out', type: 'std_1.0@table', color: '#111' }],
+    [{ name: 'n1:out', type: 'std_1.0@table', color: '#111', label: 'n1.out', title: '' }],
     '同一端口的边只出现一次',
   )
   assertDeepEqual(
     byId.g1.data.inPorts,
-    [{ name: 'n1:in', types: ['std_1.0@table'], color: '#222' }],
-    '入端口同样按边界边推导',
+    [{ name: 'n1:in', types: ['std_1.0@table'], color: '#222', label: 'n1.in', title: '' }],
+    '入端口同样按新端口模型给出',
+  )
+})
+
+addCase('projectGraph 新端口模型：空闲端口全集、内部占用与跨边界并集', () => {
+  const make = (id, title, inPorts, outPorts) => {
+    const node = compNode(id)
+    node.data.title = title
+    node.data.inPorts = inPorts
+    node.data.outPorts = outPorts
+    return node
+  }
+  const input = (name) => ({ name, types: ['T'], color: '#in' })
+  const output = (name) => ({ name, type: 'T', color: '#out' })
+  const a = make('a', 'A', [input('data')], [output('out'), output('out2')])
+  const b = make('b', 'B', [input('data')], [output('out')])
+  const x = make('x', 'X', [input('in')], [])
+  const edges = [
+    wireEdge('e1', 'a', 'out', 'b', 'data'),
+    wireEdge('e2', 'a', 'out', 'x', 'in'),
+  ]
+  const result = projectGraph({
+    nodes: [a, b, x],
+    edges,
+    groups: [grp('g', ['a', 'b'], { collapsed: true })],
+  })
+  const card = result.nodes.find((node) => node.id === 'g')
+  assertDeepEqual(
+    card.data.inPorts.map((port) => port.name),
+    ['a:data'],
+    '被内部边喂过的 b:data 不出现，空闲的 a:data 出现',
+  )
+  assertDeepEqual(
+    card.data.outPorts.map((port) => port.name),
+    ['a:out2', 'b:out', 'a:out'],
+    '空闲输出 + 跨边界输出取并集，a:out 虽喂内部仍保留',
+  )
+  check(card.data.outPorts[2].label === 'A.out', '端口标签用组件标题.端口名')
+  check(
+    card.data.outPorts[2].type === 'T',
+    '端口类型沿用真实端口',
+  )
+  const boundary = result.edges[0]
+  check(
+    boundary.source === 'g' && boundary.sourceHandle === 'a:out' && boundary.target === 'x',
+    '跨边界边仍投影成卡片端口到外部节点',
+  )
+
+  const c = make('c', 'C', [input('data')], [output('out')])
+  const d = make('d', 'D', [input('data')], [output('out')])
+  const disconnected = projectGraph({
+    nodes: [c, d],
+    edges: [],
+    groups: [grp('g2', ['c', 'd'], { collapsed: true })],
+  }).nodes.find((node) => node.id === 'g2')
+  assertDeepEqual(
+    disconnected.data.inPorts.map((port) => port.name),
+    ['c:data', 'd:data'],
+    '互不相连的成员也露出全部输入端口',
+  )
+  assertDeepEqual(
+    disconnected.data.outPorts.map((port) => port.name),
+    ['c:out', 'd:out'],
+    '互不相连的成员也露出全部输出端口',
+  )
+
+  const e = make('e', 'E', [], [output('out')])
+  const f = make('f', 'F', [input('data')], [])
+  const internal = projectGraph({
+    nodes: [e, f],
+    edges: [wireEdge('e3', 'e', 'out', 'f', 'data')],
+    groups: [grp('g3', ['e', 'f'], { collapsed: true })],
+  }).nodes.find((node) => node.id === 'g3')
+  assertDeepEqual(internal.data.inPorts, [], '内部边喂住的输入端口不上卡片')
+  assertDeepEqual(internal.data.outPorts, [], '只喂内部的输出端口不上卡片')
+})
+
+addCase('projectGraph 嵌套组端口穿透到内层组件', () => {
+  const node = compNode('n1')
+  node.data.title = '叶子'
+  node.data.inPorts = [{ name: 'data', types: ['T'], color: '#1' }]
+  node.data.outPorts = [{ name: 'out', type: 'T', color: '#2' }]
+  const collapsed = projectGraph({
+    nodes: [node],
+    edges: [],
+    groups: [
+      grp('outer', ['inner'], { collapsed: true }),
+      grp('inner', ['n1'], { collapsed: true }),
+    ],
+  })
+  const outer = collapsed.nodes.find((item) => item.id === 'outer')
+  const inner = collapsed.nodes.find((item) => item.id === 'inner')
+  assertDeepEqual(
+    outer.data.inPorts.map((port) => port.label),
+    ['叶子.data'],
+    '外层端口穿透到内层组件',
+  )
+  assertDeepEqual(
+    inner.data.inPorts.map((port) => port.label),
+    ['叶子.data'],
+    '内层卡片按自己的叶子集合计算端口',
+  )
+  check(inner.hidden === true, '外层折叠时内层卡片隐藏')
+
+  const expanded = projectGraph({
+    nodes: [node],
+    edges: [],
+    groups: [grp('outer', ['inner']), grp('inner', ['n1'], { collapsed: true })],
+  }).nodes.find((item) => item.id === 'inner')
+  check(expanded.hidden === false, '外层展开时内层卡片可见')
+  assertDeepEqual(
+    expanded.data.outPorts.map((port) => port.label),
+    ['叶子.out'],
+    '内层卡片仍按自己的叶子集合计算端口',
+  )
+})
+
+addCase('connectionAllowed 返回解析后的连接，不兼容时为 null', () => {
+  const a = compNode('a')
+  a.data.inPorts = [{ name: 'data', types: ['table'], color: '#1' }]
+  a.data.outPorts = [{ name: 'out', type: 'table', color: '#2' }]
+  const x = compNode('x')
+  x.data.inPorts = [{ name: 'in', types: ['table'], color: '#3' }]
+  x.data.outPorts = [{ name: 'out', type: 'model', color: '#4' }]
+  const nodes = [a, x]
+  const groups = [grp('g', ['a'])]
+  assertDeepEqual(
+    connectionAllowed(nodes, groups, {
+      source: 'a', sourceHandle: 'out', target: 'x', targetHandle: 'in',
+    }),
+    { source: 'a', sourceHandle: 'out', target: 'x', targetHandle: 'in' },
+    '组内 -> 组外应返回解析后的连接',
+  )
+  check(
+    connectionAllowed(nodes, groups, {
+      source: 'x', sourceHandle: 'out', target: 'a', targetHandle: 'data',
+    }) === null,
+    'model -> table 类型不兼容应返回 null',
+  )
+  check(
+    connectionAllowed(nodes, groups, {
+      source: 'a', sourceHandle: 'out', target: 'a', targetHandle: 'data',
+    }) === null,
+    '自己连自己应返回 null',
+  )
+  const collapsed = [grp('g', ['a'], { collapsed: true })]
+  assertDeepEqual(
+    connectionAllowed(nodes, collapsed, {
+      source: 'g', sourceHandle: 'a:out', target: 'x', targetHandle: 'in',
+    }),
+    { source: 'a', sourceHandle: 'out', target: 'x', targetHandle: 'in' },
+    '组卡片端口应解析回真实节点后返回',
   )
 })
 
@@ -1036,7 +1159,7 @@ addCase('selectionUnits 畸形环有界返回', () => {
   check(units.length <= 2, `返回数量应有界：${JSON.stringify(units)}`)
 })
 
-addCase('commonParent / canGroup / canDissolve 判定', () => {
+addCase('commonParent / canGroup 判定', () => {
   const groups = [grp('g1', ['n1', 'n2', 'g2', 'g3']), grp('g2', ['n5']), grp('g3', ['n6'])]
   check(commonParent(groups, ['n1', 'n2']) === 'g1', '同父应返回该父组')
   check(commonParent(groups, ['n7', 'n8']) === null, 'root 层同父返回 null')
@@ -1045,9 +1168,6 @@ addCase('commonParent / canGroup / canDissolve 判定', () => {
   check(canGroup(groups, ['g2', 'g3']) === true, '同父的两个子组可以再建组')
   check(canGroup(groups, ['n7']) === false, '单个单元不能建组')
   check(canGroup(groups, ['g2', 'n1']) === false, '不同父不能建组')
-  check(canDissolve(groups, ['g1']) === true, '恰好选一个组可以解散')
-  check(canDissolve(groups, ['n7']) === false, '选节点不能解散')
-  check(canDissolve(groups, ['g1', 'g2']) === false, '选多个组不能解散')
 })
 
 addCase('nextGroupId 跳过已用编号', () => {
@@ -1123,6 +1243,115 @@ addCase('setCollapsed 只改目标组', () => {
   check(!('position' in bad[0]), 'position 非有限值时不写')
 })
 
+addCase('renameGroup 只改目标组标题并返回新数组', () => {
+  const groups = [
+    grp('g1', ['n1'], { title: '旧名', position: { x: 1, y: 2 } }),
+    grp('g2', ['n2']),
+  ]
+  const snapshot = JSON.parse(JSON.stringify(groups))
+  const next = renameGroup(groups, 'g1', '  回归 模型  ')
+  check(next !== groups, '应返回新数组')
+  assertDeepEqual(
+    next[0],
+    { id: 'g1', title: '回归 模型', collapsed: false, members: ['n1'], position: { x: 1, y: 2 } },
+    '目标组只换标题（trim 后保留中间空格），其它字段原样',
+  )
+  check(next[1] === groups[1], '其它组应是原对象')
+  assertDeepEqual(groups, snapshot, '入参数组不能被修改')
+})
+
+addCase('renameGroup 空标题返回原数组', () => {
+  const groups = [grp('g1', ['n1']), grp('g2', ['n2'])]
+  check(renameGroup(groups, 'g1', '') === groups, '空串应返回原数组引用')
+  check(renameGroup(groups, 'g1', '   ') === groups, '全空白应返回原数组引用')
+  assertDeepEqual(groups.map((group) => group.title), ['g1', 'g2'], '标题不应变化')
+})
+
+addCase('renameGroup 目标不存在时原样返回', () => {
+  const groups = [grp('g1', ['n1']), grp('g2', ['n2'])]
+  const next = renameGroup(groups, 'g9', '新名')
+  // 实际行为：走 map，所以是新数组；元素与输入同一批对象，没有组被改名。
+  assertDeepEqual(next.map((group) => group.title), ['g1', 'g2'], '没有组被改名')
+  check(next.length === groups.length, `长度不变：${next.length}`)
+  check(next.every((group, index) => group === groups[index]), '元素应是原对象')
+  check(next !== groups, '实际返回新数组（map 语义）')
+})
+
+addCase('renameGroup 往返：导出后 addition 标题是新名且版本仍为 1', () => {
+  const groups = [grp('g1', ['n1', 'n2'], { title: '旧名' }), grp('g2', ['n3'])]
+  const renamed = renameGroup(groups, 'g1', '  回归 模型  ')
+  const nodes = [
+    compNode('n1', { x: 1, y: 2 }),
+    compNode('n2', { x: 3, y: 4 }),
+    compNode('n3', { x: 5, y: 6 }),
+  ]
+  const workflow = buildWorkflow({
+    name: 'rename-roundtrip',
+    nodes,
+    edges: [],
+    envRows: [],
+    addition: null,
+    groups: serializeGroups(renamed),
+  })
+  const addition = readAddition(workflow)
+  assertDeepEqual(
+    addition.groups.map((group) => group.title),
+    ['回归 模型', 'g2'],
+    '读回的 groups 标题应是新名',
+  )
+  check(workflow.addition.version === 1, `导出 addition 版本应仍为 1：${workflow.addition.version}`)
+  check(workflow.addition.client === 'workflow-studio', '导出 addition 客户端不变')
+})
+
+addCase('renameGroup 标题截断 40 字且先 trim', () => {
+  const groups = [grp('g1', ['n1'])]
+  const sixty = '回'.repeat(60)
+  const next = renameGroup(groups, 'g1', sixty)
+  check(next[0].title.length === 40, `应截成 40 个字，实际 ${next[0].title.length}`)
+  check(next[0].title === sixty.slice(0, 40), '应是前 40 个字符')
+  check(
+    Buffer.byteLength(next[0].title, 'utf8') === 120,
+    `按字符截断：40 个汉字应是 120 字节，实际 ${Buffer.byteLength(next[0].title, 'utf8')}`,
+  )
+
+  const padded = `  ${'编'.repeat(45)}  `
+  const trimmed = renameGroup(groups, 'g1', padded)
+  check(trimmed[0].title === '编'.repeat(40), '首尾空白不占 40 个字额度')
+  check(trimmed[0].title === trimmed[0].title.trim(), '结果本身没有首尾空白')
+
+  check(renameGroup(groups, 'g1', '') === groups, '空串仍返回原数组引用')
+  check(renameGroup(groups, 'g1', '   ') === groups, '全空白仍返回原数组引用')
+})
+
+addCase('renameGroup 按码点截断，不劈开代理对', () => {
+  const loneSurrogate =
+    /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/
+  const rename = (title) => renameGroup([grp('g1', ['n1'])], 'g1', title)[0].title
+  const roundtrip = (value) => JSON.parse(JSON.stringify({ value })).value
+
+  // 自检判据本身：被劈开的 emoji 必须能检出孤立高代理项。
+  check(loneSurrogate.test('x' + '😀'.slice(0, 1)), '自检：孤立高代理项应被检出')
+
+  const fits = rename('a'.repeat(39) + '😀')
+  check(Array.from(fits).length === 40, `应是 40 个码点，实际 ${Array.from(fits).length}`)
+  check(fits.length === 41, `UTF-16 长度应为 41，实际 ${fits.length}`)
+  check(fits.endsWith('😀'), '第 40 个码点的 emoji 应完整保留')
+  check(!loneSurrogate.test(fits), '不应出现孤立代理项')
+  check(roundtrip(fits) === fits, 'JSON 往返后仍是同一个字符')
+
+  const cut = rename('a'.repeat(40) + '😀')
+  check(Array.from(cut).length === 40, `应是 40 个码点，实际 ${Array.from(cut).length}`)
+  check(cut === 'a'.repeat(40), `第 41 个码点（emoji）应整个被砍掉，实际 ${JSON.stringify(cut)}`)
+  check(!loneSurrogate.test(cut), '不应出现孤立代理项')
+
+  const emojis = rename('😀'.repeat(45))
+  check(Array.from(emojis).length === 40, `应截成 40 个码点，实际 ${Array.from(emojis).length}`)
+  check(emojis === '😀'.repeat(40), '应是 40 个完整 emoji，不是 20 个')
+  check(emojis.length === 80, `UTF-16 长度应为 80，实际 ${emojis.length}`)
+  check(!loneSurrogate.test(emojis), '不应出现孤立代理项')
+  check(roundtrip(emojis) === emojis, 'JSON 往返后仍是同一串')
+})
+
 addCase('pruneGroups 删除后收敛且畸形环不死循环', () => {
   const nodes = [compNode('n1'), compNode('n2')]
   const one = pruneGroups([grp('g1', ['n1', 'n2'])], [nodes[0]])
@@ -1147,6 +1376,34 @@ addCase('dropEdgesForNodes 命中源或目标就删', () => {
   ]
   const kept = dropEdgesForNodes(edges, ['n2'])
   assertDeepEqual(kept.map((edge) => edge.id), ['e3'], '命中源或目标的边都应删除')
+})
+
+addCase('删除子图组合：叶子 + 删边 + prune', () => {
+  const groups = [grp('A', ['nA', 'B']), grp('B', ['nB', 'C']), grp('C', ['nC'])]
+  const nodes = [compNode('nA'), compNode('nB'), compNode('nC'), compNode('n8'), compNode('n9')]
+  const edges = [
+    wireEdge('e1', 'nC', 'out', 'n9', 'in'), // 跨 A 边界
+    wireEdge('e2', 'nA', 'out', 'nC', 'in'), // A 内部
+    wireEdge('e3', 'n9', 'out', 'n8', 'in'), // 完全在 A 外
+  ]
+  const remaining = (leaves) => nodes.filter((node) => !leaves.includes(node.id))
+
+  // 删 A：A/B/C 三组一起走
+  const leavesA = memberLeaves(groups, 'A').map((leaf) => leaf.nodeId).sort()
+  assertDeepEqual(leavesA, ['nA', 'nB', 'nC'], 'A 的叶子是 A/B/C 里的全部组件')
+  assertDeepEqual(
+    dropEdgesForNodes(edges, leavesA).map((edge) => edge.id),
+    ['e3'],
+    '只剩 A 外那条边',
+  )
+  assertDeepEqual(pruneGroups(groups, remaining(leavesA)), [], '组件删空后 groups 为空')
+
+  // 删中间层 B：C 一起走；A 的 members 里 B 被清掉，A 还有 nA 所以留下
+  const leavesB = memberLeaves(groups, 'B').map((leaf) => leaf.nodeId).sort()
+  assertDeepEqual(leavesB, ['nB', 'nC'], 'B 的叶子含 C 里的组件')
+  const prunedB = pruneGroups(groups, remaining(leavesB))
+  check(prunedB.length === 1 && prunedB[0].id === 'A', `A 应保留：${JSON.stringify(prunedB)}`)
+  assertDeepEqual(prunedB[0].members, ['nA'], 'A 的 members 里 B 被清掉且 A 没变空')
 })
 
 addCase('nodeBoxes / unitBox / selectionBox 尺寸与递归合并', () => {
@@ -1361,6 +1618,88 @@ addCase('addition groups 非数组与坏条目被忽略', () => {
   assertDeepEqual(mixed.groups[1].members, ['n1'], '正常条目原样保留')
 })
 
+addCase('addition 严格校验：空 id、重复 id、撞节点 id 计入 droppedGroups', () => {
+  const nodes = [{ id: 'n1' }, { id: 'n2' }]
+  const nodeSnapshot = JSON.parse(JSON.stringify(nodes))
+  const raw = {
+    nodes,
+    addition: {
+      client: 'workflow-studio',
+      version: 1,
+      positions: {},
+      groups: [
+        { id: '', title: '空 id' },
+        { id: '   ', title: '全空白 id' },
+        { id: 'g1', title: '甲' },
+        { id: 'g1', title: '重复的 g1' },
+        { id: 'n1', title: '撞节点 id' },
+        { id: 'g2', title: '乙' },
+      ],
+    },
+  }
+  const result = readAddition(raw)
+  assertDeepEqual(
+    result.groups.map((group) => group.id),
+    ['g1', 'g2'],
+    '合法组按原顺序保留，重复 id 首条胜出',
+  )
+  assertDeepEqual(
+    result.groups.map((group) => group.title),
+    ['甲', '乙'],
+    '保留的应是首条那两条',
+  )
+  check(result.droppedGroups === 4, `应丢弃 4 条，实际 ${result.droppedGroups}`)
+  check(result.warning === '', `合法 addition 不应有 warning：${result.warning}`)
+  assertDeepEqual(nodes, nodeSnapshot, '节点列表不受分组校验影响')
+
+  const clean = readAddition({
+    nodes,
+    addition: { client: 'workflow-studio', version: 1, groups: [{ id: 'g1', title: '甲' }] },
+  })
+  check(clean.droppedGroups === 0, `全部合法时计数应为 0，实际 ${clean.droppedGroups}`)
+})
+
+addCase('addition 严格校验：title 规范化、坏 position 只删字段', () => {
+  const raw = {
+    addition: {
+      client: 'workflow-studio',
+      version: 1,
+      groups: [
+        { id: 5, title: '数字 id' },
+        { id: 'g1', title: 5 },
+        { id: 'g2', title: null },
+        { id: 'g3', title: '  有空格  ', position: 'nope' },
+        { id: 'g4', title: '缺 y', position: { x: 1 } },
+        { id: 'g5', title: '好坐标', position: { x: 1, y: 2 } },
+      ],
+    },
+  }
+  const result = readAddition(raw)
+  assertDeepEqual(
+    result.groups.map((group) => group.id),
+    ['g1', 'g2', 'g3', 'g4', 'g5'],
+    '坏 position 不整条丢，数字 id 整条丢',
+  )
+  check(result.droppedGroups === 1, `只有数字 id 计入丢弃，实际 ${result.droppedGroups}`)
+  check(
+    typeof result.groups[0].title === 'string' && result.groups[0].title === '5',
+    `数字 title 应字符串化：${JSON.stringify(result.groups[0].title)}`,
+  )
+  check(result.groups[0].title.trim() === '5', 'title 之后可直接 trim 不抛')
+  check(
+    result.groups[1].title === '',
+    `null title 应归一成空串：${JSON.stringify(result.groups[1].title)}`,
+  )
+  check(!('position' in result.groups[2]), '非对象 position 只删字段')
+  check(
+    result.groups[2].title === '有空格',
+    `title 应 trim：${JSON.stringify(result.groups[2].title)}`,
+  )
+  check(!('position' in result.groups[3]), '缺 y 的 position 只删字段')
+  assertDeepEqual(result.groups[4].position, { x: 1, y: 2 }, '好坐标保留')
+  check(result.groups[4].title === '好坐标', '正常组原样')
+})
+
 addCase('buildWorkflow 过滤 group/frame 卡片节点', () => {
   const nodes = [
     compNode('n1', { x: 1, y: 2 }, { path: 'data.csv' }),
@@ -1429,7 +1768,11 @@ addCase('projectGraph 嵌套折叠：外层组吸收内层端点', () => {
     ['n1:out'],
     'G 卡片应带边界输出端口',
   )
-  assertDeepEqual(gCard.data.inPorts, [], 'G 卡片不应有幽灵入端口')
+  assertDeepEqual(
+    gCard.data.inPorts.map((port) => port.name),
+    ['n1:in'],
+    'G 卡片应带叶子组件未被内部占用的入端口',
+  )
 
   const onlyInner = projectGraph({
     nodes,

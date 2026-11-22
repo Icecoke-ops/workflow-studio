@@ -7,7 +7,7 @@ from table.impl.checks import require_columns
 class ValueCounts(TableIn):
     name = "ValueCounts"
     title = "值计数"
-    desc = "统计一列里每个取值出现的次数或占比"
+    desc = "统计一列里每个值出现的次数或占比"
 
     @staticmethod
     def config_schema():

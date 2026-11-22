@@ -21,6 +21,7 @@ from _harness import (
     RUN_ID_RE,
     check,
     env_guard,
+    get_registry,
     plugin_source,
     run_cases,
     write_demo_data,
@@ -365,10 +366,12 @@ def case_plugins_command():
         check(token in out, f"输出里应包含 {token}：{out!r}")
     check("类型" in out, f"输出里应包含类型清单：{out!r}")
     check("组件" in out, f"输出里应包含组件清单：{out!r}")
-    check(
-        "统计量在当前表上计算" in out,
-        f"FillMissing 说明应提醒统计量口径：{out!r}",
-    )
+    # 不断言 desc 的措辞（一句话会随文案改）：从加载器取真实 desc，验证 CLI 原样打印；
+    # 端口名是结构契约，可以稳定断言。
+    fill = get_registry().get_component("table", "FillMissing")
+    check(fill.desc != "", "FillMissing 应声明 desc，否则这条断言没有意义")
+    check(fill.desc in out, f"输出里应原样打印 FillMissing 的 desc：{fill.desc!r}")
+    check("入 reference" in out, f"FillMissing 的输入端口 reference 应出现在输出：{out!r}")
     check(err == "", f"plugins 子命令不应输出错误：{err!r}")
 
 

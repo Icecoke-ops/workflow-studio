@@ -74,7 +74,7 @@ def _make_estimator(module, name, kwargs):
 class LinearRegression(_Regressor):
     name = "LinearRegression"
     title = "线性回归"
-    desc = "普通最小二乘线性回归"
+    desc = "拟合线性关系并输出回归模型"
     sklearn_module = "linear_model"
     sklearn_name = "LinearRegression"
     param_names = ("fit_intercept",)
@@ -96,7 +96,7 @@ class LinearRegression(_Regressor):
 class Ridge(_Regressor):
     name = "Ridge"
     title = "岭回归"
-    desc = "L2 正则线性回归"
+    desc = "拟合线性关系并抑制过拟合，输出回归模型"
     sklearn_module = "linear_model"
     sklearn_name = "Ridge"
     param_names = ("alpha", "fit_intercept")
@@ -126,7 +126,7 @@ class Ridge(_Regressor):
 class Lasso(_Regressor):
     name = "Lasso"
     title = "Lasso 回归"
-    desc = "L1 正则线性回归，会把不重要的特征系数压成 0"
+    desc = "拟合线性关系并淘汰不重要的特征，输出回归模型"
     sklearn_module = "linear_model"
     sklearn_name = "Lasso"
     param_names = ("alpha", "max_iter")
@@ -157,7 +157,7 @@ class Lasso(_Regressor):
 class RandomForestRegressor(_Regressor):
     name = "RandomForestRegressor"
     title = "随机森林回归"
-    desc = "多棵决策树取平均，非线性"
+    desc = "拟合复杂的非线性关系，输出回归模型"
     sklearn_module = "ensemble"
     sklearn_name = "RandomForestRegressor"
     param_names = ("n_estimators", "max_depth", "random_state")
@@ -191,7 +191,7 @@ class RandomForestRegressor(_Regressor):
 class GradientBoostingRegressor(_Regressor):
     name = "GradientBoostingRegressor"
     title = "梯度提升回归"
-    desc = "逐棵树拟合残差，非线性"
+    desc = "逐棵拟合残差，输出能抓住复杂非线性关系的回归模型"
     sklearn_module = "ensemble"
     sklearn_name = "GradientBoostingRegressor"
     param_names = ("n_estimators", "learning_rate", "max_depth")

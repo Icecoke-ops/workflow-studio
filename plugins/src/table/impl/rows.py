@@ -12,7 +12,7 @@ _OPS = ("eq", "ne", "gt", "ge", "lt", "le", "in", "contains", "notnull", "isnull
 class FilterRows(TableIn):
     name = "FilterRows"
     title = "筛选行"
-    desc = "按一列的比较结果保留行，只做列 + 比较符 + 值"
+    desc = "筛选出满足条件的行，每次只看一列"
 
     @staticmethod
     def config_schema():
@@ -98,7 +98,7 @@ class FilterRows(TableIn):
 class SortRows(TableIn):
     name = "SortRows"
     title = "排序"
-    desc = "按一列或多列排序"
+    desc = "调整行的先后顺序，可指定一列或多列"
 
     @staticmethod
     def config_schema():
@@ -134,7 +134,7 @@ class SortRows(TableIn):
 class HeadRows(TableIn):
     name = "HeadRows"
     title = "取前 N 行"
-    desc = "保留表格的前 n 行"
+    desc = "只保留表格开头那几行，行数可调"
 
     @staticmethod
     def config_schema():
@@ -162,7 +162,7 @@ class HeadRows(TableIn):
 class ConcatTables(Component):
     name = "ConcatTables"
     title = "纵向拼接"
-    desc = "把两张表上下拼成一张"
+    desc = "把第二张表格接在第一张表格后面"
 
     @staticmethod
     def config_schema():

@@ -4,6 +4,8 @@ import { computed, reactive, watch } from 'vue'
 const props = defineProps({
   schema: { type: Object, default: () => ({}) },
   config: { type: Object, required: true },
+  // false = 由调用方自己出标题行：不出「参数（N）」折叠条，也不画分隔线
+  header: { type: Boolean, default: true },
 })
 
 const open = defineModel('open', { type: Boolean, default: true })
@@ -93,8 +95,9 @@ function onJsonInput(name, text, spec) {
 </script>
 
 <template>
-  <div class="config-panel">
+  <div class="config-panel" :class="{ 'config-panel-bare': !header }">
     <button
+      v-if="header"
       class="collapse-toggle nodrag nopan"
       type="button"
       @pointerdown.stop
@@ -200,6 +203,12 @@ function onJsonInput(name, text, spec) {
   border-top: 1px dashed #f0f2f5;
   margin-top: 2px;
   padding-top: 2px;
+}
+
+.config-panel-bare {
+  border-top: none;
+  margin-top: 0;
+  padding-top: 0;
 }
 
 .config-form {

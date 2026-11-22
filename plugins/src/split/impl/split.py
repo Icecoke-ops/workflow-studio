@@ -6,7 +6,7 @@ from split.impl.base import TableIn
 class SplitTable(TableIn):
     name = "SplitTable"
     title = "切分训练/测试"
-    desc = "按比例随机切成 train 和 test 两张表"
+    desc = "切分表格为训练集和测试集，比例可调"
 
     @staticmethod
     def config_schema():
@@ -68,7 +68,7 @@ class SplitTable(TableIn):
 class SplitXY(TableIn):
     name = "SplitXY"
     title = "拆分 X / Y"
-    desc = "按列拆成特征表 X 和目标表 Y，分别送给预测与评估"
+    desc = "拆出特征表和目标表，两表行序一一对应"
 
     @staticmethod
     def config_schema():

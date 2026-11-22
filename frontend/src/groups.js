@@ -1,4 +1,4 @@
-/** 子图的全部判断：树的成员关系、选区归一、投影（节点/边/端口）、层级约束、prune。
+/** 子图的全部判断：树的成员关系、选区归一、投影（节点/边/端口）、prune。
  *  纯函数，不 import Vue、不读 ref；App 与组件只搬运结果。 */
 
 const GROUP = 'group'
@@ -25,44 +25,22 @@ export function parentOf(groups, unitId) {
   return null
 }
 
-/** 由近到远的祖先 id；带环保护，畸形数据不会死循环。 */
-function ancestorIds(groups, unitId) {
-  const ids = []
-  let parent = parentOf(groups, unitId)
+/** 由近到远的祖先组；带环保护，畸形数据不会死循环。 */
+function ancestorGroups(groups, unitId) {
+  const found = []
   const visited = new Set()
+  let parent = parentOf(groups, unitId)
   while (parent && !visited.has(parent)) {
     visited.add(parent)
-    ids.push(parent)
+    found.push(findGroup(groups, parent))
     parent = parentOf(groups, parent)
-  }
-  return ids
-}
-
-/** 最近的、处于折叠态的直接或间接祖先组；没有返回 null。 */
-export function collapsedAncestor(groups, unitId) {
-  for (const id of ancestorIds(groups, unitId)) {
-    const group = findGroup(groups, id)
-    if (!group) return null
-    if (group.collapsed) return group.id
-  }
-  return null
-}
-
-/** 最外层的折叠祖先组；没有返回 null。投影时可见实体是最外层折叠组。 */
-function outermostCollapsedAncestor(groups, unitId) {
-  let found = null
-  for (const id of ancestorIds(groups, unitId)) {
-    const group = findGroup(groups, id)
-    if (!group) break
-    if (group.collapsed) found = group.id
   }
   return found
 }
 
-/** 连线层级约束：两端必须处于同一层；组卡片代表它所在的那一层。 */
-export function canConnect(groups, sourceId, targetId) {
-  if (!sourceId || !targetId || sourceId === targetId) return false
-  return parentOf(groups, sourceId) === parentOf(groups, targetId)
+/** 最外层的折叠祖先组；没有返回 null。投影时可见实体是最外层折叠组。 */
+function outermostCollapsedAncestor(groups, unitId) {
+  return ancestorGroups(groups, unitId).filter((group) => group.collapsed).at(-1)?.id || null
 }
 
 export function parseHandle(handle) {
@@ -70,6 +48,11 @@ export function parseHandle(handle) {
   const index = handle.lastIndexOf(':')
   if (index <= 0 || index === handle.length - 1) return null
   return { nodeId: handle.slice(0, index), port: handle.slice(index + 1) }
+}
+
+/** 组卡片 handle 名：`${节点id}:${端口名}`。投影与端口清单共用这一处定义。 */
+function portHandle(nodeId, port) {
+  return `${nodeId}:${port}`
 }
 
 /** 画布上的连接尝试 -> 真实节点/端口的连接。 */
@@ -92,6 +75,22 @@ function resolveEndpoint(groups, id, handle) {
   return { nodeId: id, port: handle }
 }
 
+/** 新连线是否允许：两端是不同可见实体，且解析回真实端口后类型兼容。
+ *  跨子图边界的连线放行——折叠组的边界边正由此产生。
+ *  允许时返回解析后的真实连接，不允许返回 null。 */
+export function connectionAllowed(nodes, groups, connection) {
+  const { source, target } = connection || {}
+  if (!source || !target || source === target) return null
+  const real = resolveConnection(groups, connection)
+  if (!real || real.source === real.target) return null
+  const sourceNode = nodes.find((node) => node.id === real.source)
+  const targetNode = nodes.find((node) => node.id === real.target)
+  if (!sourceNode || !targetNode) return null
+  const output = (sourceNode.data?.outPorts || []).find((port) => port.name === real.sourceHandle)
+  const input = (targetNode.data?.inPorts || []).find((port) => port.name === real.targetHandle)
+  return output && input && input.types.includes(output.type) ? real : null
+}
+
 /** 真实边 -> 画布边：折叠组内的端点换成组卡片，组内边不画；id 沿用真实边 id。 */
 export function projectEdges(edges, groups) {
   const projected = []
@@ -103,38 +102,91 @@ export function projectEdges(edges, groups) {
       ...edge,
       source: sourceGroup || edge.source,
       sourceHandle: sourceGroup
-        ? `${edge.source}:${edge.sourceHandle}`
+        ? portHandle(edge.source, edge.sourceHandle)
         : edge.sourceHandle,
       target: targetGroup || edge.target,
       targetHandle: targetGroup
-        ? `${edge.target}:${edge.targetHandle}`
+        ? portHandle(edge.target, edge.targetHandle)
         : edge.targetHandle,
     })
   }
   return projected
 }
 
-/** 折叠组卡片两端的端口：从投影后的边界边实时推导，不存端口清单。 */
-function collectGroupPorts(groups, projectedEdges, nodeById) {
+/** 组端口 = 叶子组件里所有「没有被内部边占用」的端口，并上跨组边界边用到的端口。
+ *  叶子递归穿透子组；内部边指两端都在叶子集合里的边。
+ *  输出端口取并集是必须的：一个输出可以同时喂内部和外部，只算「空闲」会吞掉跨边界那条边。 */
+function collectGroupPorts(groups, edges, nodeById) {
   const ports = new Map()
-  for (const edge of projectedEdges) {
-    for (const [id, handleId, listKey, typeKey] of [
-      [edge.source, edge.sourceHandle, 'outPorts', 'type'],
-      [edge.target, edge.targetHandle, 'inPorts', 'types'],
-    ]) {
-      if (!findGroup(groups, id)) continue
-      const handle = parseHandle(handleId)
-      const port = handle
-        ? (nodeById.get(handle.nodeId)?.data[listKey] || []).find(
-            (item) => item.name === handle.port,
-          )
-        : null
-      if (!ports.has(id)) ports.set(id, { inPorts: [], outPorts: [] })
-      const list = ports.get(id)[listKey]
-      if (!list.some((item) => item.name === handleId)) {
-        list.push({ name: handleId, [typeKey]: port?.[typeKey], color: port?.color })
+  const pointKey = (nodeId, port) => `${nodeId}\u0000${port}`
+
+  const entryFor = (node, port, side) => ({
+    name: portHandle(node.id, port.name),
+    ...(side === 'in' ? { types: port.types } : { type: port.type }),
+    color: port.color,
+    label: `${node.data?.title || node.id}.${port.name}`,
+    title: port.full || '',
+  })
+
+  const boundaryEntry = (nodeId, portName, side) => {
+    const node = nodeById.get(nodeId)
+    const list = side === 'in' ? node?.data?.inPorts : node?.data?.outPorts
+    const port = (list || []).find((item) => item.name === portName)
+    return port ? entryFor(node, port, side) : null
+  }
+
+  for (const group of groups) {
+    const leafIds = memberLeaves(groups, group.id).map((leaf) => leaf.nodeId)
+    const leafSet = new Set(leafIds)
+    const usedInputs = new Set()
+    const usedOutputs = new Set()
+    const crossingIn = []
+    const crossingOut = []
+
+    for (const edge of edges) {
+      if (!edge.source || !edge.target) continue
+      const sourceIn = leafSet.has(edge.source)
+      const targetIn = leafSet.has(edge.target)
+      if (!sourceIn && !targetIn) continue
+      if (sourceIn && targetIn) {
+        usedOutputs.add(pointKey(edge.source, edge.sourceHandle))
+        usedInputs.add(pointKey(edge.target, edge.targetHandle))
+      } else if (sourceIn) {
+        crossingOut.push({ nodeId: edge.source, port: edge.sourceHandle })
+      } else {
+        crossingIn.push({ nodeId: edge.target, port: edge.targetHandle })
       }
     }
+
+    const inPorts = new Map()
+    const outPorts = new Map()
+
+    for (const nodeId of leafIds) {
+      const node = nodeById.get(nodeId)
+      if (!node) continue
+      for (const port of node.data?.inPorts || []) {
+        if (usedInputs.has(pointKey(nodeId, port.name))) continue
+        const entry = entryFor(node, port, 'in')
+        inPorts.set(entry.name, entry)
+      }
+      for (const port of node.data?.outPorts || []) {
+        if (usedOutputs.has(pointKey(nodeId, port.name))) continue
+        const entry = entryFor(node, port, 'out')
+        outPorts.set(entry.name, entry)
+      }
+    }
+    for (const { nodeId, port } of crossingIn) {
+      const entry = port && boundaryEntry(nodeId, port, 'in')
+      if (!entry) continue
+      inPorts.set(entry.name, entry)
+    }
+    for (const { nodeId, port } of crossingOut) {
+      const entry = port && boundaryEntry(nodeId, port, 'out')
+      if (!entry) continue
+      outPorts.set(entry.name, entry)
+    }
+
+    ports.set(group.id, { inPorts: [...inPorts.values()], outPorts: [...outPorts.values()] })
   }
   return ports
 }
@@ -147,17 +199,21 @@ export function projectGraph({ nodes, edges, groups }) {
   const componentNodes = nodes.filter(isComponentNode)
   const nodeById = new Map(componentNodes.map((node) => [node.id, node]))
   const projectedEdges = projectEdges(edges, groups)
-  const ports = collectGroupPorts(groups, projectedEdges, nodeById)
+  const ports = collectGroupPorts(groups, edges, nodeById)
   const previous = new Map(nodes.map((node) => [node.id, node]))
 
   const result = componentNodes.map((node) => ({
     ...node,
-    hidden: Boolean(collapsedAncestor(groups, node.id)),
+    hidden: Boolean(outermostCollapsedAncestor(groups, node.id)),
   }))
 
   for (const group of groups) {
-    const hidden = Boolean(collapsedAncestor(groups, group.id))
+    const hidden = Boolean(outermostCollapsedAncestor(groups, group.id))
     const previousNode = previous.get(group.id)
+    // frame 与组卡片共用 group.id；Vue Flow 的 parseNode 用 Object.assign 复用同 id 节点，
+    // 某个形态没声明的交互字段会沿用上一个形态的值。
+    // card 分支刻意不写 selected：靠这次复用保留选中，重命名/重投影时选中不会丢；
+    // 改这两个分支的交互字段时要成对检查。
     if (group.collapsed) {
       const portData = ports.get(group.id) || { inPorts: [], outPorts: [] }
       // 只有上一帧也是组卡片时才复用位置；frame 固定在 (0,0)，不能拿来当卡片位置
@@ -168,6 +224,9 @@ export function projectGraph({ nodes, edges, groups }) {
         position: previousPosition || group.position || { x: 80, y: 60 },
         hidden,
         selectable: true,
+        draggable: true,
+        connectable: true,
+        zIndex: 0,
         data: {
           groupId: group.id,
           title: group.title,
@@ -186,8 +245,14 @@ export function projectGraph({ nodes, edges, groups }) {
         selectable: false,
         draggable: false,
         connectable: false,
+        selected: false,
         zIndex: -1,
-        data: { groupId: group.id, title: group.title, groups },
+        data: {
+          groupId: group.id,
+          title: group.title,
+          count: membersOf(group).length,
+          groups,
+        },
       })
     }
   }
@@ -248,21 +313,15 @@ export function selectionUnits(groups, selectedIds) {
   )
 }
 
-/** 祖孙关系：沿 parentOf 往上找；带环保护，畸形数据不会死循环。 */
+/** 祖孙关系；带环保护。 */
 function isAncestor(groups, ancestorId, unitId) {
-  let parent = parentOf(groups, unitId)
-  const visited = new Set()
-  while (parent && !visited.has(parent)) {
-    if (parent === ancestorId) return true
-    visited.add(parent)
-    parent = parentOf(groups, parent)
-  }
-  return false
+  return ancestorGroups(groups, unitId).some((group) => group.id === ancestorId)
 }
 
 function outermostUnit(groups, unitId) {
-  if (findGroup(groups, unitId)) return unitId
-  return ancestorIds(groups, unitId).at(-1) || unitId
+  return findGroup(groups, unitId)
+    ? unitId
+    : ancestorGroups(groups, unitId).at(-1)?.id || unitId
 }
 
 /** 单元们的共同父组；不同父组返回 undefined（root 为 null）。 */
@@ -277,12 +336,7 @@ export function canGroup(groups, selectedIds) {
   return units.length >= 2 && commonParent(groups, units) !== undefined
 }
 
-export function canDissolve(groups, selectedIds) {
-  return selectedIds.length === 1 && Boolean(findGroup(groups, selectedIds[0]))
-}
-
-export function nextGroupId(groups, nodes = []) {
-  const used = new Set([
+export function nextGroupId(groups, nodes = []) {  const used = new Set([
     ...groups.map((group) => group.id),
     ...nodes.map((node) => node.id),
   ])
@@ -349,6 +403,16 @@ export function setCollapsed(groups, groupId, collapsed, position) {
     }
     return next
   })
+}
+
+/**
+ * 给一层子图改名：只改目标组的 title；trim 后为空不接受，返回原数组。
+ * 40 码点是数据约束，按码点切（`slice` 切的是 UTF-16 码元，会把代理对截成半个）。
+ */
+export function renameGroup(groups, groupId, title) {
+  const value = Array.from(String(title ?? '').trim()).slice(0, 40).join('')
+  if (!value) return groups
+  return groups.map((group) => (group.id === groupId ? { ...group, title: value } : group))
 }
 
 /** 节点删除后的收拾：members 去掉不存在的单元，空组解散（逐层收敛）。 */

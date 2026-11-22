@@ -33,7 +33,7 @@ def _plugin():
 class SaveModel(Component):
     name = "SaveModel"
     title = "保存模型"
-    desc = "把模型保存成文件并原样传给下游；模型文件是 pickle 格式，只应加载可信来源的文件"
+    desc = "保存模型到文件，并原样传给下游节点"
 
     @staticmethod
     def config_schema():
@@ -74,10 +74,7 @@ class SaveModel(Component):
 class LoadModel(Component):
     name = "LoadModel"
     title = "加载模型"
-    desc = (
-        "从模型文件读回模型；模型文件是 pickle 格式，反序列化会执行文件里的代码，"
-        "只加载可信来源的文件"
-    )
+    desc = "读回文件里保存的模型；反序列化会执行文件里的代码，只加载可信来源的文件"
 
     @staticmethod
     def config_schema():

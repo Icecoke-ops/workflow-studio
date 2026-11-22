@@ -18,7 +18,6 @@ export function buildNodeData(component, config, { typeDescs = {}, typeColors = 
   const typeColor = (typeId) => typeColors[typeId] || FALLBACK_COLOR
   return {
     plugin: component.plugin,
-    pluginTitle: component.pluginTitle || '',
     component: component.name,
     title: component.title,
     desc: component.desc,
@@ -55,7 +54,6 @@ export function buildNodeData(component, config, { typeDescs = {}, typeColors = 
 export function missingNodeData(plugin, component) {
   return {
     plugin,
-    pluginTitle: '',
     component,
     title: `${plugin}.${component}`,
     desc: '当前插件集合里没有这个组件',
@@ -221,6 +219,7 @@ export function planImport(raw, { componentFor, typeDescs = {}, typeColors = {} 
     nodes: created,
     edges,
     groups,
+    droppedGroups: additionInfo.droppedGroups,
     skipped,
     missing,
   }

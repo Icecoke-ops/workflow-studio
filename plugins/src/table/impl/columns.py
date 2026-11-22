@@ -7,7 +7,7 @@ from table.impl.checks import require_columns
 class SelectColumns(TableIn):
     name = "SelectColumns"
     title = "选择列"
-    desc = "按列名顺序保留指定列"
+    desc = "挑出需要的列，可自行决定先后顺序"
 
     @staticmethod
     def config_schema():
@@ -50,7 +50,7 @@ class SelectColumns(TableIn):
 class DropColumns(TableIn):
     name = "DropColumns"
     title = "删除列"
-    desc = "按列名删除指定列"
+    desc = "删掉指定的列，一次可以删掉多列"
 
     @staticmethod
     def config_schema():
@@ -79,7 +79,7 @@ class DropColumns(TableIn):
 class RenameColumns(TableIn):
     name = "RenameColumns"
     title = "重命名列"
-    desc = "按 旧列名→新列名 的映射改名"
+    desc = "把旧列名换成新名字，一次可改多列"
 
     @staticmethod
     def config_schema():
@@ -116,7 +116,7 @@ class RenameColumns(TableIn):
 class CastColumn(TableIn):
     name = "CastColumn"
     title = "转换列类型"
-    desc = "把一列转成指定类型"
+    desc = "转换一列的数据类型，可转成数值、文本、布尔或日期"
 
     @staticmethod
     def config_schema():

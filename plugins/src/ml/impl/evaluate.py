@@ -9,7 +9,7 @@ _ALLOWED = ("mse", "rmse", "mae", "r2", "mape")
 class EvaluateRegression(Component):
     name = "EvaluateRegression"
     title = "回归评估"
-    desc = "计算 mse / rmse / mae / r2 / mape；真实值与预测值按行序一一对应"
+    desc = "对比真实值和预测值，算出回归误差指标"
 
     @staticmethod
     def config_schema():
