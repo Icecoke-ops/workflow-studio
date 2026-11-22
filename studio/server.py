@@ -11,6 +11,8 @@
     GET  /api/plugins     插件、类型、组件及端口 schema
     POST /api/validate    校验工作流
     POST /api/run         校验并执行工作流
+    POST /api/debug/start 起调试子进程（WebSocket 由 hooks/http_debug 提供）
+    POST /api/debug/stop  停止调试子进程
     GET  /                前端页面（studio/web/index.html）
     GET  /static/<file>   前端静态资源
 """
@@ -21,7 +23,6 @@ import json
 import mimetypes
 import os
 import sys
-import tempfile
 import threading
 import traceback
 from http import HTTPStatus
@@ -43,16 +44,18 @@ from . import __version__
 from .contract import (
     ApiService,
     ContractError,
+    check_debug_start,
+    check_debug_stop,
     check_health,
     check_plugins,
     check_run,
     check_validate,
 )
+from .debug import DebugManager, TEMP_DIR
 
 __all__ = ["EngineService", "StudioServer", "main"]
 
 WEB_DIR = Path(__file__).resolve().parent / "web"
-TEMP_DIR = Path(tempfile.gettempdir()) / "workflow-studio"
 MAX_BODY = 16 * 1024 * 1024
 HINT_TEXT = "请先运行 python tools/build_web.py 构建前端"
 
@@ -218,11 +221,18 @@ def _nodes_payload(workflow, done, failed_id, error_message):
 
 class StudioServer(ThreadingHTTPServer):
     daemon_threads = True
+    # Windows 的 SO_REUSEADDR 允许同端口重复监听；用它默认的独占行为挡住第二次启动
+    allow_reuse_address = os.name != "nt"
 
-    def __init__(self, address, service, web_dir=WEB_DIR):
+    def __init__(self, address, service, web_dir=WEB_DIR, debug=None):
         self.service = service
+        self.debug = debug if debug is not None else DebugManager()
         self.web_dir = Path(web_dir).resolve()
         super().__init__(address, StudioHandler)
+
+    def server_close(self):
+        self.debug.shutdown()
+        super().server_close()
 
 
 class StudioHandler(BaseHTTPRequestHandler):
@@ -252,18 +262,43 @@ class StudioHandler(BaseHTTPRequestHandler):
 
     def _handle_post(self):
         path = urlsplit(self.path).path
-        if path not in ("/api/validate", "/api/run"):
+        if path not in (
+            "/api/validate",
+            "/api/run",
+            "/api/debug/start",
+            "/api/debug/stop",
+        ):
             self._not_found(path)
             return
 
         payload = self._read_json()
         if payload is None:
             return
+
+        if path == "/api/debug/stop":
+            session = payload.get("session")
+            if not isinstance(session, str) or not session:
+                self._send_json(
+                    HTTPStatus.BAD_REQUEST,
+                    {"ok": False, "errors": ["请求体缺少 session 字符串"]},
+                )
+                return
+            self._send_json(
+                HTTPStatus.OK, check_debug_stop(self.server.debug.stop(session))
+            )
+            return
+
         workflow = payload.get("workflow")
         if not isinstance(workflow, dict):
             self._send_json(
                 HTTPStatus.BAD_REQUEST,
                 {"ok": False, "errors": ["请求体缺少 workflow 对象"]},
+            )
+            return
+
+        if path == "/api/debug/start":
+            self._send_json(
+                HTTPStatus.OK, check_debug_start(self.server.debug.start(workflow))
             )
             return
 
@@ -431,7 +466,8 @@ def main(argv=None):
     except ValueError as exc:
         print(f"[环境变量不合法] {exc}", file=sys.stderr)
         return 1
-    os.environ.update({"workspace": os.getcwd(), "engine_version": ENGINE_VERSION})
+    workspace = os.getcwd()
+    os.environ.update({"workspace": workspace, "engine_version": ENGINE_VERSION})
 
     dirs = [DEFAULT_DIR] + (args.plugins_dir or [])
     try:
@@ -440,8 +476,21 @@ def main(argv=None):
         print(f"[插件加载失败] {exc}", file=sys.stderr)
         return 1
 
+    passthrough = []
+    for directory in args.plugins_dir or []:
+        # 调试子进程 cwd 是仓库根：相对路径必须先按 Studio 启动目录解析成绝对路径
+        passthrough += [
+            "--plugins-dir",
+            os.path.normpath(os.path.join(workspace, directory)),
+        ]
+    for pair in args.env or []:
+        passthrough += ["-e", pair]
+    debug = DebugManager(extra_args=passthrough, workspace=workspace)
+
     try:
-        server = StudioServer((args.host, args.port), EngineService(registry, cli_env))
+        server = StudioServer(
+            (args.host, args.port), EngineService(registry, cli_env), debug=debug
+        )
     except OSError as exc:
         print(f"[启动失败] 无法监听 {args.host}:{args.port}：{exc}", file=sys.stderr)
         return 1

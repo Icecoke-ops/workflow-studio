@@ -102,3 +102,19 @@ export async function runWorkflow(workflow) {
     failedIds: nodes.filter((node) => node.failed).map((node) => node.id),
   }
 }
+
+/** 起一个调试子进程；返回 {ok, session, port, token}。契约见 §6.1。 */
+export async function startDebugSession(workflow) {
+  return request('/debug/start', {
+    method: 'POST',
+    body: JSON.stringify({ workflow }),
+  })
+}
+
+/** 关掉调试会话（Studio 负责退子进程）。 */
+export async function stopDebugSession(session) {
+  return request('/debug/stop', {
+    method: 'POST',
+    body: JSON.stringify({ session }),
+  })
+}

@@ -5,6 +5,7 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import ComponentNode from './components/ComponentNode.vue'
 import CollapsedRail from './components/CollapsedRail.vue'
 import ContextMenu from './components/ContextMenu.vue'
+import DebugPanel from './components/DebugPanel.vue'
 import EnvDrawer from './components/EnvDrawer.vue'
 import GraphCanvas from './components/GraphCanvas.vue'
 import GroupFrame from './components/GroupFrame.vue'
@@ -13,8 +14,17 @@ import Inspector from './components/Inspector.vue'
 import Palette from './components/Palette.vue'
 import ResultPanel from './components/ResultPanel.vue'
 import { readAddition } from './addition'
-import { fetchHealth, fetchPlugins, runWorkflow, validateWorkflow } from './api'
+import {
+  fetchHealth,
+  fetchPlugins,
+  runWorkflow,
+  startDebugSession,
+  stopDebugSession,
+  validateWorkflow,
+} from './api'
 import { collectCopy, planPaste } from './clipboard'
+import { DebugClient } from './debug/client.js'
+import { EMPTY_VIEW, appendLog, applyState, isBusy } from './debug/model.js'
 import {
   canGroup,
   commonParent,
@@ -66,6 +76,17 @@ const groups = ref([])
 const selectedIds = ref([])
 const clipboard = ref(null)
 const contextMenu = ref(null)
+
+// ---- 调试会话状态（协议见 docs/CONTRACT.md §9.6 / §6.1） ----
+const debugSession = ref(null) // { session, port, token }
+const debugView = ref(EMPTY_VIEW)
+const debugLogs = ref([])
+const debugError = ref('')
+const debugStarting = ref(false)
+let debugClient = null
+
+const debugActive = computed(() => debugSession.value !== null)
+const debugBusy = computed(() => isBusy(debugView.value.phase))
 const workflowName = ref('未命名工作流')
 const workflowEnv = ref([])
 const additionState = ref(null)
@@ -251,8 +272,27 @@ function decorateNodes(projectedNodes) {
         data: { ...node.data, onToggleCollapse: toggleGroupCollapsed, onRename: renameOne },
       }
     }
-    return { ...node, data: { ...node.data, onDelete: removeComponent } }
+    return withDebug({ ...node, data: { ...node.data, onDelete: removeComponent } })
   })
+}
+
+/** 组件节点挂调试信息：右上角运行三角 + 状态描边；非调试态一律 null。 */
+function withDebug(node) {
+  const status = debugActive.value ? debugView.value.nodes[node.id]?.status || 'unrun' : null
+  return {
+    ...node,
+    data: {
+      ...node.data,
+      debugStatus: status,
+      debugCanRun: debugActive.value && !debugBusy.value,
+      onDebugRun: runDebugNode,
+    },
+  }
+}
+
+/** 状态 / phase / 在途标记变了就刷新画布节点上的调试字段，不动图结构。 */
+function refreshDebugNodes() {
+  nodes.value = nodes.value.map((node) => (isComponentNode(node) ? withDebug(node) : node))
 }
 
 function decorateEdges(projectedEdges) {
@@ -489,6 +529,8 @@ async function applyWorkflow(raw) {
       return false
     }
   }
+  // 调试子进程里跑的是导入前的快照，换图前先收掉
+  await stopDebug()
   const plan = planImport(raw, {
     componentFor: (plugin, component) => componentIndex.value.get(`${plugin}.${component}`),
     typeDescs: typeDescs.value,
@@ -558,6 +600,7 @@ async function newWorkflow() {
       return
     }
   }
+  await stopDebug()
   nodes.value = []
   edges.value = []
   canvasEdges.value = []
@@ -609,6 +652,119 @@ async function doRun() {
     activeTab.value = 'run'
     markFailedNodes(runResult.value?.failedIds)
   }
+}
+
+// ---- 调试会话 ----------------------------------------------------------
+
+function onDebugState(state) {
+  debugView.value = applyState(debugView.value, state)
+  refreshDebugNodes()
+}
+
+function onDebugLog(message) {
+  debugLogs.value = appendLog(debugLogs.value, message)
+}
+
+function onDebugError(message) {
+  debugError.value = typeof message?.message === 'string' ? message.message : '调试出错'
+}
+
+function onDebugClose() {
+  if (!debugActive.value) return
+  ElMessage.warning('调试进程已退出')
+  void stopDebug()
+}
+
+async function startDebug() {
+  if (debugStarting.value || debugActive.value) return
+  debugStarting.value = true
+  let started = null
+  try {
+    started = await startDebugSession(buildWorkflow())
+    // Studio 启动失败是 200 + ok:false，errors 里带原因和子进程 stderr 尾部，原样透给用户
+    if (started?.ok === false || !started?.session || !started?.port || !started?.token) {
+      const detail = Array.isArray(started?.errors) && started.errors.length
+        ? started.errors.join('；')
+        : '调试服务返回的会话信息不完整'
+      throw new Error(detail)
+    }
+    const client = new DebugClient({
+      port: started.port,
+      token: started.token,
+      handlers: {
+        onState: onDebugState,
+        onLog: onDebugLog,
+        onError: onDebugError,
+        onClose: onDebugClose,
+      },
+    })
+    debugClient = client
+    await client.connect()
+    debugSession.value = started
+    debugView.value = EMPTY_VIEW
+    debugLogs.value = []
+    debugError.value = ''
+    refreshDebugNodes()
+    client.send({ cmd: 'state' })
+  } catch (err) {
+    debugClient?.close()
+    debugClient = null
+    debugSession.value = null
+    debugView.value = EMPTY_VIEW
+    refreshDebugNodes()
+    if (started?.session) {
+      await stopDebugSession(started.session).catch(() => {})
+    }
+    ElMessage.error(`启动调试失败：${err.message}`)
+  } finally {
+    debugStarting.value = false
+  }
+}
+
+async function stopDebug() {
+  const info = debugSession.value
+  debugClient?.close()
+  debugClient = null
+  debugSession.value = null
+  debugView.value = EMPTY_VIEW
+  debugLogs.value = []
+  debugError.value = ''
+  refreshDebugNodes()
+  if (info?.session) {
+    try {
+      await stopDebugSession(info.session)
+    } catch {
+      // 子进程可能已经自己退了
+    }
+  }
+}
+
+async function toggleDebug() {
+  if (debugStarting.value) return
+  if (debugActive.value) await stopDebug()
+  else await startDebug()
+}
+
+function sendDebugCommand(cmd) {
+  if (!debugClient || debugBusy.value) return
+  debugError.value = ''
+  if (!debugClient.send(cmd)) {
+    ElMessage.warning('调试连接已断开')
+  }
+}
+
+function runDebugNode(nodeId) {
+  const node = nodes.value.find((item) => item.id === nodeId)
+  if (!node) return
+  sendDebugCommand({ cmd: 'run_node', id: nodeId, config: node.data.config || {} })
+}
+
+function continueDebug() {
+  sendDebugCommand({ cmd: 'continue' })
+}
+
+function stopDebugExecution() {
+  debugClient?.send({ cmd: 'stop' })
 }
 
 // ---- 后端连接 ----------------------------------------------------------
@@ -681,6 +837,16 @@ onMounted(async () => {
         运行
       </el-button>
       <el-button size="small" @click="envDrawerVisible = true">环境变量</el-button>
+      <el-button
+        size="small"
+        :type="debugActive ? 'danger' : 'primary'"
+        plain
+        :loading="debugStarting"
+        :disabled="running || validating"
+        @click="toggleDebug"
+      >
+        {{ debugActive ? '结束调试' : '调试' }}
+      </el-button>
 
       <div class="spacer"></div>
 
@@ -753,13 +919,22 @@ onMounted(async () => {
     </main>
 
     <div
-      v-if="layout.bottomOpen"
+      v-if="debugActive || layout.bottomOpen"
       class="resize-handle resize-horizontal"
       title="拖拽调整底部高度"
       @pointerdown="startResize('bottom', $event)"
     />
+    <DebugPanel
+      v-if="debugActive"
+      :view="debugView"
+      :logs="debugLogs"
+      :error="debugError"
+      :style="{ height: layout.bottomHeight + 'px' }"
+      @continue="continueDebug"
+      @stop="stopDebugExecution"
+    />
     <ResultPanel
-      v-if="layout.bottomOpen"
+      v-else-if="layout.bottomOpen"
       v-model:active-tab="activeTab"
       :report="validateReport"
       :run="runResult"

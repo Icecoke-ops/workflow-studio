@@ -1,6 +1,7 @@
 <script setup>
 import { computed } from 'vue'
 import { Handle, Position } from '@vue-flow/core'
+import { nodeStatusClass } from '../debug/model.js'
 import ConfigForm from './ConfigForm.vue'
 
 const props = defineProps({
@@ -35,7 +36,13 @@ function onTitleClick(event) {
 </script>
 
 <template>
-  <div class="cnode" :class="{ selected, failed: data.failed, missing: data.missing }">
+  <div
+    class="cnode"
+    :class="[
+      nodeStatusClass(data.debugStatus),
+      { selected, failed: data.failed && !data.debugStatus, missing: data.missing },
+    ]"
+  >
     <div class="cnode-head">
       <div class="cnode-head-text">
         <div class="cnode-title-line">
@@ -70,6 +77,18 @@ function onTitleClick(event) {
         <div v-if="!data.missing" class="cnode-meta">{{ data.plugin }}.{{ data.component }}</div>
         <div v-if="data.descOpen && data.desc" class="cnode-desc">{{ data.desc }}</div>
       </div>
+      <button
+        v-if="data.debugStatus && !data.missing"
+        class="cnode-run nodrag nopan"
+        type="button"
+        title="运行此节点"
+        aria-label="运行此节点"
+        :disabled="!data.debugCanRun"
+        @pointerdown.stop
+        @click.stop="data.onDebugRun?.(id)"
+      >
+        ▶
+      </button>
       <button
         class="cnode-delete nodrag nopan"
         type="button"
@@ -151,7 +170,7 @@ function onTitleClick(event) {
       </div>
     </div>
 
-    <div v-if="data.failed" class="cnode-fail">运行失败</div>
+    <div v-if="data.failed && !data.debugStatus" class="cnode-fail">运行失败</div>
   </div>
 </template>
 
@@ -182,6 +201,23 @@ function onTitleClick(event) {
 
 .cnode.missing {
   border-style: dashed;
+  border-color: var(--danger);
+}
+
+/* 调试态：节点按运行状态描边（selected 的选中环走 box-shadow，不冲突） */
+.cnode.status-unrun {
+  border-color: var(--border);
+}
+
+.cnode.status-fresh {
+  border-color: var(--success);
+}
+
+.cnode.status-stale {
+  border-color: var(--warning);
+}
+
+.cnode.status-failed {
   border-color: var(--danger);
 }
 
@@ -290,7 +326,8 @@ function onTitleClick(event) {
   word-break: break-word;
 }
 
-.cnode-delete {
+.cnode-delete,
+.cnode-run {
   flex: none;
   width: 20px;
   height: 20px;
@@ -298,16 +335,34 @@ function onTitleClick(event) {
   border: none;
   border-radius: 4px;
   background: transparent;
-  color: #c0c4cc;
-  font-size: 16px;
   line-height: 18px;
   cursor: pointer;
   transition: color 0.12s, background 0.12s;
 }
 
+.cnode-delete {
+  color: #c0c4cc;
+  font-size: 16px;
+}
+
 .cnode-delete:hover {
   color: var(--danger);
   background: #fef0f0;
+}
+
+.cnode-run {
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.cnode-run:hover:not(:disabled) {
+  color: var(--primary);
+  background: #ecf5ff;
+}
+
+.cnode-run:disabled {
+  cursor: default;
+  opacity: 0.4;
 }
 
 .cnode-body {

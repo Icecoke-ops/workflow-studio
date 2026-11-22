@@ -169,3 +169,39 @@ def check_run(payload):
     if payload.get("ok") and set(seen) != set(order):
         _fail(f"run: ok=true 时 nodes 覆盖的节点必须与 order 完全一致，实际 {seen} vs {order}")
     return payload
+
+
+def _check_errors(payload, what):
+    errors = payload.get("errors")
+    if (
+        not isinstance(errors, list)
+        or not errors
+        or not all(isinstance(item, str) for item in errors)
+    ):
+        _fail(f"{what}: ok=false 时 errors 必须是非空字符串数组")
+
+
+def check_debug_start(payload):
+    _expect_dict(payload, "debug_start")
+    if _expect_bool(payload, "ok"):
+        if not isinstance(payload.get("session"), str) or not payload["session"]:
+            _fail("debug_start.session 必须是非空字符串")
+        port = payload.get("port")
+        if (
+            not isinstance(port, int)
+            or isinstance(port, bool)
+            or not 1 <= port <= 65535
+        ):
+            _fail("debug_start.port 必须是 1-65535 的整数")
+        if not isinstance(payload.get("token"), str) or not payload["token"]:
+            _fail("debug_start.token 必须是非空字符串")
+    else:
+        _check_errors(payload, "debug_start")
+    return payload
+
+
+def check_debug_stop(payload):
+    _expect_dict(payload, "debug_stop")
+    if not _expect_bool(payload, "ok"):
+        _check_errors(payload, "debug_stop")
+    return payload

@@ -1908,6 +1908,479 @@ addCase('api.js 200 合法响应正常 resolve', async () => {
   )
 })
 
+// ---------------------------------------------------------------------------
+// debug 调试模块（frontend/src/debug）
+// 按冻结接口写，不照 WIP 实现写；模块缺失时整组跳过并打印 skip。
+// ---------------------------------------------------------------------------
+
+const DEBUG_PHASES = ['idle', 'running', 'paused', 'ended', 'failed']
+
+async function importDebugModule(specifier) {
+  try {
+    return await import(specifier)
+  } catch (err) {
+    if (err && err.code === 'ERR_MODULE_NOT_FOUND') {
+      console.log(`skip  ${specifier}：模块未落地`)
+      return null
+    }
+    throw err
+  }
+}
+
+class FakeWebSocket {
+  static instances = []
+  static CONNECTING = 0
+  static OPEN = 1
+  static CLOSING = 2
+  static CLOSED = 3
+
+  constructor(url) {
+    this.url = url
+    this.readyState = FakeWebSocket.CONNECTING
+    this.sent = []
+    this.listeners = { open: [], message: [], error: [], close: [] }
+    FakeWebSocket.instances.push(this)
+  }
+
+  addEventListener(type, callback) {
+    if (!this.listeners[type]) this.listeners[type] = []
+    this.listeners[type].push(callback)
+  }
+
+  removeEventListener(type, callback) {
+    const list = this.listeners[type] || []
+    const index = list.indexOf(callback)
+    if (index >= 0) list.splice(index, 1)
+  }
+
+  _fire(type, event) {
+    const handler = this[`on${type}`]
+    if (typeof handler === 'function') handler(event)
+    for (const callback of this.listeners[type] || []) callback(event)
+  }
+
+  open() {
+    this.readyState = FakeWebSocket.OPEN
+    this._fire('open', {})
+  }
+
+  fail() {
+    this._fire('error', {})
+  }
+
+  emit(payload) {
+    this._fire('message', {
+      data: typeof payload === 'string' ? payload : JSON.stringify(payload),
+    })
+  }
+
+  close() {
+    this.readyState = FakeWebSocket.CLOSED
+    this._fire('close', { code: 1000, reason: 'closed' })
+  }
+
+  send(text) {
+    this.sent.push(text)
+  }
+}
+
+// 客户端在 connect() 里 new WebSocket(...)，导入前先把全局替身装好。
+globalThis.WebSocket = FakeWebSocket
+
+const debugModel = await importDebugModule('../frontend/src/debug/model.js')
+const debugClient = await importDebugModule('../frontend/src/debug/client.js')
+
+function lastDebugSocket() {
+  const socket = FakeWebSocket.instances[FakeWebSocket.instances.length - 1]
+  check(socket !== undefined, 'DebugClient.connect() 应创建 WebSocket')
+  return socket
+}
+
+async function connectDebugClient(client) {
+  let promise
+  try {
+    promise = client.connect()
+  } catch (err) {
+    throw new Error(`冻结接口要求 connect() 无参并返回 Promise：${err.message}`)
+  }
+  const socket = lastDebugSocket()
+  socket.open()
+  await promise
+  return socket
+}
+
+
+if (debugModel) {
+  const { applyState, appendLog, nodeStatusClass, isBusy, phaseLabel } = debugModel
+
+  addCase('debug.applyState 五种 phase 原样保留', () => {
+    for (const phase of DEBUG_PHASES) {
+      const view = applyState(
+        { phase: 'idle', current: null, nodes: {} },
+        {
+          phase,
+          current: 'n2',
+          order: ['n1', 'n2'],
+          nodes: { n1: { status: 'fresh', duration_ms: 3.5, error: null, outputs: {} } },
+        },
+      )
+      check(view.phase === phase, `phase 应为 ${phase}，实际 ${view.phase}`)
+      check(view.current === 'n2', `current 应保留：${view.current}`)
+      check(
+        view.nodes && view.nodes.n1 && view.nodes.n1.status === 'fresh',
+        `nodes 应保留：${JSON.stringify(view.nodes)}`,
+      )
+      assertDeepEqual(
+        Object.keys(view.nodes.n1),
+        ['status'],
+        '节点只保留 status（duration_ms/error/outputs 已按 Occam 减项删除）',
+      )
+    }
+  })
+
+  addCase('debug.applyState state 为 null 或空对象不抛且字段齐全', () => {
+    const previous = { phase: 'paused', current: 'n1', nodes: {} }
+    for (const view0 of [null, previous]) {
+      for (const state of [null, {}]) {
+        const view = applyState(view0, state)
+        for (const key of ['phase', 'current', 'nodes']) {
+          check(key in view, `applyState 结果应含 ${key}：${JSON.stringify(view)}`)
+        }
+        check(typeof view.phase === 'string', `phase 应是字符串：${view.phase}`)
+        check(
+          view.nodes && typeof view.nodes === 'object' && !Array.isArray(view.nodes),
+          `nodes 应是对象：${JSON.stringify(view.nodes)}`,
+        )
+      }
+    }
+  })
+
+  addCase('debug.applyState 未知 status 不崩且节点只留 status', () => {
+    const view = applyState(null, {
+      phase: 'running',
+      current: 'n1',
+      order: ['n1'],
+      nodes: {
+        n1: { status: 'weird', duration_ms: 8, error: 'boom', outputs: { a: 1 } },
+      },
+    })
+    check(view.nodes.n1 && typeof view.nodes.n1 === 'object', '未知 status 不应崩')
+    assertDeepEqual(Object.keys(view.nodes.n1), ['status'], '节点只留 status 一个键')
+    check(
+      typeof view.nodes.n1.status === 'string' && view.nodes.n1.status !== '',
+      `未知 status 应归一成非空字符串：${view.nodes.n1.status}`,
+    )
+  })
+
+  addCase('debug.appendLog 单对象形态', () => {
+    const one = appendLog([], { node: 'n1', stream: 'stdout', text: 'hello' })
+    check(Array.isArray(one) && one.length === 1, `单对象应追加一行：${one.length}`)
+    assertDeepEqual(
+      one[0],
+      { node: 'n1', stream: 'stdout', text: 'hello' },
+      '单对象应原样追加为一条日志',
+    )
+
+    const two = appendLog(one, { node: 'n2', stream: 'stderr', text: 'beta' })
+    check(two.length === 2, `逐条追加应累加：${two.length}`)
+    check(
+      two[0].text === 'hello' && two[1].text === 'beta',
+      `顺序不能乱：${JSON.stringify(two)}`,
+    )
+    check(two[1].stream === 'stderr', `stderr 应保留：${two[1].stream}`)
+  })
+
+  addCase('debug.appendLog 形状、stream 归一与坏条目丢弃', () => {
+    const item = appendLog([], {
+      node: 'n1',
+      stream: 'stdout',
+      text: 'x',
+      extra: 1,
+      text2: 'y',
+    })[0]
+    assertDeepEqual(
+      Object.keys(item).sort(),
+      ['node', 'stream', 'text'],
+      '每条日志恰好 {node, stream, text} 三个键',
+    )
+    assertDeepEqual(
+      item,
+      { node: 'n1', stream: 'stdout', text: 'x' },
+      '多余字段应被丢掉',
+    )
+
+    check(
+      appendLog([], { node: 'n1', stream: 'stderr', text: 'err' })[0].stream ===
+        'stderr',
+      'stderr 应保留',
+    )
+    check(
+      appendLog([], { node: 'n2', stream: 'weird', text: 'out' })[0].stream ===
+        'stdout',
+      'stream 非 stderr 应归一成 stdout',
+    )
+    check(
+      appendLog([], { node: 'n3', text: 'no-stream' })[0].stream === 'stdout',
+      '缺 stream 应归一成 stdout',
+    )
+
+    const lines = [{ node: null, stream: 'stdout', text: 'keep' }]
+    const snapshot = JSON.parse(JSON.stringify(lines))
+    for (const bad of [
+      { node: 'n1', stream: 'stdout', text: '' },
+      { node: 'n2', stream: 'stdout', text: 42 },
+      { node: 'n3', stream: 'stdout' },
+    ]) {
+      const result = appendLog(lines, bad)
+      check(
+        result === lines,
+        `text 为空/非字符串/缺失时应返回原数组引用：${JSON.stringify(bad)}`,
+      )
+    }
+    assertDeepEqual(lines, snapshot, '入参数组不能被修改')
+  })
+
+  addCase('debug.appendLog 超上限丢头不丢尾', () => {
+    let lines = []
+    for (let index = 0; index < 5001; index += 1) {
+      lines = appendLog(lines, { node: null, stream: 'stdout', text: `L${index}` })
+    }
+    check(lines.length === 5000, `上限应是 5000，实际 ${lines.length}`)
+    check(lines[0].text === 'L1', `应丢头：第一行 ${lines[0].text}`)
+    check(lines[1].text === 'L2', `顺序不能乱：${lines[1].text}`)
+    check(
+      lines[lines.length - 1].text === 'L5000',
+      `应保留最后一行：${lines[lines.length - 1].text}`,
+    )
+    const contiguous = lines.every((line, index) => line.text === `L${index + 1}`)
+    check(contiguous, '超上限时应保留尾部连续段，中间不能有洞')
+  })
+
+  addCase('debug.appendLog 非法 message 不改变原数组', () => {
+    const lines = [{ node: 'n1', stream: 'stdout', text: 'keep-1' }]
+    const snapshot = JSON.parse(JSON.stringify(lines))
+    for (const bad of [[], null, undefined, 'text']) {
+      const result = appendLog(lines, bad)
+      check(result === lines, `非法 message 应返回原数组引用：${JSON.stringify(bad)}`)
+    }
+    assertDeepEqual(lines, snapshot, '入参数组不能被修改')
+  })
+
+  addCase('debug.nodeStatusClass 四种状态的确切 class、null 空串', () => {
+    assertDeepEqual(
+      ['unrun', 'fresh', 'stale', 'failed'].map((status) => nodeStatusClass(status)),
+      ['status-unrun', 'status-fresh', 'status-stale', 'status-failed'],
+      '四种状态应映射到确切的 class 名',
+    )
+    check(nodeStatusClass(null) === '', `null 不应挂 class：${nodeStatusClass(null)}`)
+    let unknown
+    try {
+      unknown = nodeStatusClass('weird')
+    } catch (err) {
+      throw new Error(`未知状态不应抛异常：${err.message}`)
+    }
+    check(typeof unknown === 'string', `未知状态应返回字符串：${typeof unknown}`)
+  })
+
+  addCase('debug.isBusy 真值表：可点 = !isBusy(phase)', () => {
+    check(isBusy('running') === true, 'running 是忙')
+    for (const phase of ['idle', 'paused', 'ended', 'failed']) {
+      check(isBusy(phase) === false, `isBusy(${phase}) 应为 false`)
+    }
+    // 单节点可点与否只由 isBusy 推导，不再有 canRunNode。
+    check(!isBusy('running') === false, 'running 时不可点')
+    for (const phase of ['idle', 'paused', 'ended', 'failed']) {
+      check(!isBusy(phase) === true, `${phase} 时可点`)
+    }
+  })
+
+  addCase('debug.phaseLabel 五种 phase 的确切文案', () => {
+    assertDeepEqual(
+      DEBUG_PHASES.map((phase) => phaseLabel(phase)),
+      ['空闲', '运行中', '已暂停', '已结束', '已失败'],
+      '五种 phase 的文案应与契约一致',
+    )
+  })
+}
+
+if (debugClient) {
+  addCase('debug.client 四种报文分别派发且参数形状正确', async () => {
+    const calls = []
+    const handlers = {
+      onState: (payload) => calls.push(['state', payload]),
+      onLog: (payload) => calls.push(['log', payload]),
+      onAck: (payload) => calls.push(['ack', payload]),
+      onError: (payload) => calls.push(['error', payload]),
+    }
+    FakeWebSocket.instances.length = 0
+    const client = new debugClient.DebugClient({ port: 8801, token: 'tok', handlers })
+    const socket = await connectDebugClient(client)
+
+    const state = { phase: 'running', current: 'n1', order: ['n1'], nodes: {} }
+    const log = { type: 'log', node: 'n1', stream: 'stdout', text: 'hello' }
+    const ack = { type: 'ack', cmd: 'run_node' }
+    const error = { type: 'error', message: 'boom' }
+    socket.emit({ type: 'state', data: state })
+    socket.emit(log)
+    socket.emit(ack)
+    socket.emit(error)
+
+    const names = calls.map(([name]) => name)
+    check(
+      names.join(',') === 'state,log,ack,error',
+      `四种报文应分别派发，实际：${JSON.stringify(names)}`,
+    )
+    assertDeepEqual(calls[0][1], state, 'onState 应只收到 message.data')
+    assertDeepEqual(calls[1][1], log, 'onLog 应收到整条消息')
+    assertDeepEqual(calls[2][1], ack, 'onAck 应收到整条消息')
+    assertDeepEqual(calls[3][1], error, 'onError 应收到整条消息')
+  })
+
+  addCase('debug.client 未知 type / 非 JSON / 非字符串都忽略', async () => {
+    const calls = []
+    const handlers = {
+      onState: () => calls.push('state'),
+      onLog: () => calls.push('log'),
+      onAck: () => calls.push('ack'),
+      onError: () => calls.push('error'),
+      onClose: () => calls.push('close'),
+    }
+    FakeWebSocket.instances.length = 0
+    const client = new debugClient.DebugClient({ port: 8801, token: 'tok', handlers })
+    const socket = await connectDebugClient(client)
+    socket.emit({ type: 'nope', whatever: 1 })
+    socket.emit('not json at all')
+    socket._fire('message', { data: 42 })
+    socket._fire('message', { data: { type: 'state', data: { phase: 'running' } } })
+    check(calls.length === 0, `坏报文应全部忽略：${JSON.stringify(calls)}`)
+  })
+
+  addCase('debug.client event 报文不再派发（注册 onEvent 也收不到）', async () => {
+    const calls = []
+    const handlers = {
+      onState: () => calls.push('state'),
+      onEvent: () => calls.push('event'),
+      onLog: () => calls.push('log'),
+      onAck: () => calls.push('ack'),
+      onError: () => calls.push('error'),
+      onClose: () => calls.push('close'),
+    }
+    FakeWebSocket.instances.length = 0
+    const client = new debugClient.DebugClient({ port: 8801, token: 'tok', handlers })
+    const socket = await connectDebugClient(client)
+    socket.emit({ type: 'event', event: 'node_end', data: { node: 'n1' } })
+    check(
+      calls.length === 0,
+      `协议已删掉 event 推送，注册了 onEvent 也不该被调用：${JSON.stringify(calls)}`,
+    )
+  })
+
+  addCase('debug.client 建连前被关闭 → reject', async () => {
+    FakeWebSocket.instances.length = 0
+    const client = new debugClient.DebugClient({ port: 8801, token: 'tok', handlers: {} })
+    const promise = client.connect()
+    const socket = lastDebugSocket()
+    socket.close() // 还没 open 就被服务端关掉
+    let error = null
+    try {
+      await promise
+    } catch (err) {
+      error = err
+    }
+    check(error instanceof Error, `建连前被关闭应 reject，实际 ${error}`)
+    check(
+      String(error.message).includes('关闭'),
+      `错误信息应说明连接在建立前被关闭：${error.message}`,
+    )
+  })
+
+  addCase('debug.client onerror → reject', async () => {
+    FakeWebSocket.instances.length = 0
+    const client = new debugClient.DebugClient({ port: 8801, token: 'tok', handlers: {} })
+    const promise = client.connect()
+    const socket = lastDebugSocket()
+    socket.fail()
+    let error = null
+    try {
+      await promise
+    } catch (err) {
+      error = err
+    }
+    check(error instanceof Error, `onerror 应 reject，实际 ${error}`)
+    check(String(error.message).includes('8801'), `错误信息应带端口：${error.message}`)
+  })
+
+  addCase('debug.client 主动 close 不触发 onClose', async () => {
+    const closes = []
+    FakeWebSocket.instances.length = 0
+    const client = new debugClient.DebugClient({
+      port: 8801,
+      token: 'tok',
+      handlers: { onClose: (event) => closes.push(event) },
+    })
+    await connectDebugClient(client)
+    client.close()
+    check(closes.length === 0, `主动 close 不应触发 onClose，实际 ${closes.length}`)
+  })
+
+  addCase('debug.client 服务端断开只触发一次且带 code/reason', async () => {
+    const closes = []
+    FakeWebSocket.instances.length = 0
+    const client = new debugClient.DebugClient({
+      port: 8801,
+      token: 'tok',
+      handlers: { onClose: (event) => closes.push(event) },
+    })
+    const socket = await connectDebugClient(client)
+    socket.close()
+    socket.close()
+    check(closes.length === 1, `onClose 应只触发一次，实际 ${closes.length}`)
+    assertDeepEqual(
+      closes[0],
+      { code: 1000, reason: 'closed' },
+      'onClose 应带 {code, reason}',
+    )
+  })
+
+  addCase('debug.client 未连接时 send 返回 false 且不抛', () => {
+    FakeWebSocket.instances.length = 0
+    const client = new debugClient.DebugClient({ port: 8801, token: 'tok', handlers: {} })
+    let error = null
+    let result
+    try {
+      result = client.send({ cmd: 'state' })
+    } catch (err) {
+      error = err
+    }
+    check(error === null, `未连接时 send 不能抛异常：${error && error.message}`)
+    check(result === false, `未连接时 send 应返回 false，实际 ${result}`)
+  })
+
+  addCase('debug.client 连上后 send 发出 JSON.stringify 后的命令', async () => {
+    FakeWebSocket.instances.length = 0
+    const client = new debugClient.DebugClient({ port: 8801, token: 'tok', handlers: {} })
+    const socket = await connectDebugClient(client)
+    const command = { cmd: 'run_node', id: 'n1' }
+    check(client.send(command) === true, '已连接时 send 应返回 true')
+    check(socket.sent.length === 1, `应发送一条命令：${socket.sent.length}`)
+    check(
+      socket.sent[0] === JSON.stringify(command),
+      `发送内容应是 JSON.stringify(cmd)：${socket.sent[0]}`,
+    )
+  })
+
+  addCase('debug.client connect 使用构造参数里的 port/token', async () => {
+    FakeWebSocket.instances.length = 0
+    const client = new debugClient.DebugClient({ port: 8801, token: 'tok', handlers: {} })
+    const socket = await connectDebugClient(client)
+    check(
+      socket.url.includes('127.0.0.1:8801'),
+      `WebSocket 地址应含端口：${socket.url}`,
+    )
+    check(socket.url.includes('tok'), `WebSocket 地址应含 token：${socket.url}`)
+  })
+}
+
 // ---- 跑测 ----
 
 async function main() {

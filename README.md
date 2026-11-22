@@ -24,6 +24,7 @@
 | `plugins/src/ml/` | 机器学习：5 个回归模型、回归评估、模型保存与加载（依赖 scikit-learn、joblib） |
 | `plugins/src/core/` | 模型应用：`PredictModel`，接任何符合 `std_1.0@model` 的模型 |
 | `studio/` | 本地 Web 后端（标准库 `ThreadingHTTPServer`）+ 前端构建产物 |
+| `hooks/` | 执行钩子：日志、调试服务。与 `plugins/` 同级，**不进引擎包**，可单独分发 |
 | `frontend/` | Vite + Vue 3 可视化编辑器源码 |
 | `tools/` | 打包插件、构建前端 |
 | `tests/` | 测试套件 |
@@ -202,6 +203,38 @@ class MyComponent(Component):
 打包就是把 `plugins/src/myp/` 打成 `plugins/myp.zip`，`python tools/build_plugins.py` 会校验目录名与 `PLUGIN_NAME` 是否一致。
 
 完整的字段规则（schema 里每个键的含义、类型规则、工作流字段白名单）看 **[docs/CONTRACT.md](docs/CONTRACT.md)**。
+
+## 写一个钩子
+
+钩子挂在引擎执行的每个阶段上，用来打日志、做单步调试、接外部监控。引擎只提供事件表和分发器，**具体钩子都放 `hooks/` 下**，既不属于引擎也不属于插件，可以单独分发。
+
+一个钩子是一个目录（或单个 `.py`），必须提供 `install(ctx)`：
+
+```python
+# hooks/my_log/hook.py
+def install(ctx):
+    ctx.on("node_end", on_node_end)
+
+def on_node_end(data, execution):
+    print(f"{data['node']} 用了 {data['duration_ms']:.1f} ms")
+```
+
+```bash
+python -m engine run --hook hooks/my_log workflows/regression_demo.json
+```
+
+回调签名是 `fn(data, execution)`，**原地改 `data` 就生效**（引擎只回读该事件允许改的字段，其余忽略）。比如 `node_invoke_before` 能改节点输入、`node_end` 能改输出、`workflow_loaded` 能改整张图。目录里有 `__init__.py` 时按 Python 包加载，可以拆成多个文件。
+
+八个事件、每个事件的数据形状与可改字段、以及调试钩子的 WebSocket 协议，见 **[docs/CONTRACT.md](docs/CONTRACT.md) 第 9 节**。
+
+两个官方钩子：
+
+| 钩子 | 用途 |
+|---|---|
+| `hooks/result_file/` | 只注册 `run_end`，把最终结果写成 JSON，`-e hook_result_path=...` |
+| `hooks/http_debug/` | WebSocket 调试服务，Studio 的调试面板直连它，`-e hook_port=... -e hook_port_file=... -e hook_token=...`（`hook_port` 省略或 `0` 由系统分配，实际端口写进 `hook_port_file`） |
+
+钩子参数一律走 `-e KEY=VALUE`，不占命令行参数。一节只允许一个 `--hook`（多个钩子没法保证输入输出结构一致）。
 
 ## 测试
 

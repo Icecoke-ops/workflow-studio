@@ -263,17 +263,30 @@ self.path = expand_env(config["path"])   # "${workspace}/data/x.csv"
 | GET | `/api/plugins` | `{"plugins":[{name,version,title,types:[{id,desc}],components:[{name,title,desc,config_schema,input_schema,output_schema}]}]}` |
 | POST | `/api/validate` | 请求 `{"workflow":{...}}` → `{"ok":bool,"errors":[],"warnings":[],"order":[]}` |
 | POST | `/api/run` | 请求同上 → `{"ok":bool,"errors":[],"warnings":[],"order":[],"nodes":[{id,component,ms,outputs:{端口:preview},"error":null}]}` |
+| POST | `/api/debug/start` | 请求同上 → `{"ok":true,"session":"<id>","port":8801,"token":"<随机串>"}` |
+| POST | `/api/debug/stop` | 请求 `{"session":"<id>"}` → `{"ok":true}` |
 | GET | `/`、`/static/*` | 回 `studio/web/` 下的静态文件 |
 
 `input_schema` 每项额外带 `type_labels`（短名数组），`output_schema` 每项额外带 `type_label`，供界面显示。
 
 错误口径：请求体不是 JSON 对象（解析失败、顶层不是对象、缺 `workflow`）回 400，未知路径回 404，请求体超过 16 MiB 回 413，响应体均为 `{"ok":false,"errors":[具体消息]}`。业务失败（校验不通过、执行期异常）回 200 + `ok:false`，原因进 `errors`——`/api/run` 的执行期异常**不回 500**。服务端自身**载荷违反契约**（`ContractError`，我方 bug）回 500 + 字段级消息，原样给调用方；其余**意外异常**回 500 + `{"ok":false,"errors":["服务器内部错误"]}`，完整栈只写服务端日志，不把内部路径或异常原文暴露给前端。客户端中途断开直接静默，不写响应。
 
-### 6.1 绑定与认证
+### 6.1 调试会话
+
+调试是**子进程 + 钩子**，Studio 自己不 import 引擎跑图。前端拿到 `port`/`token` 后直连钩子的 WebSocket（§9.6），Studio 只负责起和杀。
+
+- `start`：把请求里的 `workflow` 原样写进系统临时目录的 JSON，`secrets` 随机 token，spawn `python -m engine run --hook hooks/http_debug -e hook_port=0 -e hook_port_file=<临时目录>/debug_<session>.port -e hook_token=<token> <临时文件>`；**Studio 不自己挑端口**，只等钩子把 bind 时的实际端口写进那个文件（**超时 10 秒**，超时杀子进程、删临时文件、回 `ok:false`，并把子进程 stderr 尾部带进 `errors`）。子进程提前崩同样立刻失败，不等满超时。
+  - 为什么不「先挑空闲端口再连一下」：端口在挑选和真正 bind 之间会被别人占走，而「连得上」无法区分自己的钩子和别人的监听——那会把别人的钩子当成就绪（已踩过，偶发 WebSocket 1000 关闭）。端口由 bind 分配、文件由钩子写完，窗口不存在。
+- **`--plugins-dir` 与 `-e` 必须原样透传给子进程**，否则调试子进程看到的插件和环境变量跟主进程不一致——那种差异以后极难查。**子进程的 `${workspace}` 必须等于 Studio 主进程的启动目录**（子进程 cwd 可能是仓库根，所以要用 `-e workspace=<Studio 启动目录>` 显式透传，且排在其他 `-e` 之前，让用户自己的覆盖仍然生效）；**相对路径的 `--plugins-dir` 必须先解析成绝对路径再传**。
+- **同一时刻只允许一个调试会话**；新 `start` 先按 `stop` 流程关掉旧的。
+- `stop`：先 `POST http://127.0.0.1:<port>/shutdown` 让它自己退，3 秒内没退就 `kill`；删临时文件。未知 `session` 回 `ok:false`。
+- 子进程的 stdout/stderr 由 Studio 接管，不混进 Studio 自己的输出；Studio 进程退出时关掉所有调试子进程。
+
+### 6.2 绑定与认证
 
 `--host` 默认只绑 `127.0.0.1`。绑非回环地址必须显式加 `--allow-remote`，否则**拒绝启动**：服务没有任何认证，能连上端口的人都可以调 `/api/run`，用组件读写本机任意文件。加了该参数会在 stderr 打出警告。不要把它当多用户服务用。
 
-### 6.2 前端构建约束（踩过坑）
+### 6.3 前端构建约束（踩过坑）
 
 后端静态路由是 `/static/<file>` → `studio/web/<file>`（剥掉 `/static/` 前缀后按相对路径找文件）。所以 Vite 必须构建成：
 
@@ -295,6 +308,7 @@ base: '/static/'      // 构建时生效，dev 用 '/'
 | 命令行引擎 | `python -m engine run <json>` / `validate` / `plugins` |
 | 指定插件目录 | `python -m engine run -p <dir> --plugins-dir <dir> <json>` |
 | 指定环境变量 | `python -m engine -e DATA_DIR=D:\data -e MODEL_DIR=D:\models run <json>` |
+| 挂执行钩子 | `python -m engine run --hook <钩子路径> -e hook_port=<端口> -e hook_token=<token> <json>`（`http_debug` 还要 `-e hook_port_file=<文件>`，`hook_port=0` 即系统分配） |
 | 起 Web 服务 | `python -m studio --port 8765` |
 | 局域网暴露（无认证，慎用） | `python -m studio --host 0.0.0.0 --allow-remote` |
 | 构建前端 | `python tools/build_web.py` |
@@ -308,3 +322,143 @@ base: '/static/'      // 构建时生效，dev 用 '/'
 ## 8. 刻意不做（别再提）
 
 单 env 隔离、沙箱、环执行、并发分支、重试、断点续跑、中间产物落盘、撤销重做、自动布局、多标签页。
+
+---
+
+## 9. 执行钩子
+
+引擎只提供**事件表与分发器**（`engine/hooks.py`）。具体钩子一个都不放进 `engine/`，都在 `hooks/<名字>/`，与 `plugins/` 平级，不进引擎包。
+
+### 9.1 加载与注册
+
+`python -m engine run --hook <路径> <json>`，v1 只允许一个 `--hook`，重复指定报错。
+
+- 路径是目录：找 `hook.py`，没有就找 `__init__.py`；是文件：直接加载。**目录里有 `__init__.py` 时按 Python 包加载**，可以用 `from .xxx import ...` 拆成多个文件；单文件 `hook.py` 只适合小钩子。
+- 模块必须有 `install(ctx)`。缺了报错退出，不做静默降级。
+- `install` 里用 `ctx.on(事件名, 回调)` 注册。**未知事件名直接报错并列出全部合法名**（拼写错误不许静默失效）。
+- `install` 在插件加载完成之后、`plugins_loaded` 事件触发之前调用；此刻 `ctx.execution` 是 `None`，等实例全部建好才填上——前三个事件（`plugins_loaded` / `workflow_loaded` / `env_ready`）的回调拿到的 `execution` 参数同样是 `None`。
+- 可选定义 `serve(execution)`：定义了它就由它驱动整轮运行（引擎**不自动跑任何节点**，它自己调 `run_node` / `run_all`），返回即运行结束；没定义则由引擎按 `order` 顺序跑完。`result_file` 不需要它，`http_debug` 必须有。
+- 传参一律走已有的 `-e`，不新增命令行参数。
+
+回调签名统一为 `fn(data: dict, execution) -> None`：**原地改 `data` 生效**，引擎在回调返回后只回读该事件允许的字段（见 9.2 表最后一列），其余改动忽略；返回值不用。多个钩子将来串联时就是同一份 `data` 依次传下去，结构与就地修改天然一致。
+
+### 9.2 事件表
+
+一次运行的固定顺序：
+
+```
+plugins_loaded → workflow_loaded → env_ready
+  → 全部节点先建实例: node_create_before → node_create_after   （初始化错误一次暴露，不跑到一半才炸）
+  → 逐节点: node_invoke_before → node_end
+→ run_end
+```
+
+| 事件 | 触发点 | `data` | 回读字段 |
+|---|---|---|---|
+| `plugins_loaded` | 插件全部加载完，工作流还没读 | `plugins: [名字]`、`components: int`、`types: int` | 无（只读） |
+| `workflow_loaded` | JSON 读进、**全量校验之前** | `workflow: dict`（原始 JSON）、`path: str` | `workflow` → 重新全量校验，失败即中止 |
+| `env_ready` | 三级 env 合并写进 `os.environ` 之后 | `env: {键: 值}`（工作流 `env` 与 `-e` 的合并结果，不含引擎自动注入的 `workspace` / `engine_version`） | `env` → 覆盖写回 `os.environ`，不删除未出现的键 |
+| `node_create_before` | `cls(config)` 之前 | `node: str`、`config: dict` | `config` → 校验后按它重建 |
+| `node_create_after` | 实例建好之后 | `node: str`、`instance: object` | 无（不承诺"替换实例"的语义） |
+| `node_invoke_before` | 输入取齐、`invoke()` 之前 | `node: str`、`inputs: {端口: 值}` | `inputs` → 键集必须与**工作流实际接线的**输入端口一致（可选端口没接就不要求），否则报错 |
+| `node_end` | `invoke()` 成功且输出校验通过之后 | `node: str`、`outputs: {端口: 值}`、`duration_ms: float` | `outputs` → 再走一次输出校验 |
+| `run_end` | 跑完或中止（中止时也触发） | `status: "ok"\|"failed"`、`order: [str]`、`error: str\|None`、`duration_ms: float` | 无（只读） |
+
+回调抛异常 = 中止整个运行，包装成 `RunAborted`（原异常挂 `__cause__`），`run_end` 仍触发。节点执行失败抛 `ExecutionError`，该节点状态记为 `failed`。
+
+### 9.3 Execution
+
+```python
+class Execution:
+    registry: Registry
+    workflow: Workflow | None                # workflow_loaded 之后才有
+    order: list[str]                         # 拓扑序
+    values: dict[tuple[str, str], object]    # (节点 id, 端口) -> 真实对象，就是"程序的堆"
+    results: dict[str, NodeResult]           # 节点 id -> 本轮结果（输出 + 耗时）
+    status: dict[str, str]                   # 节点 id -> unrun | fresh | stale | failed
+    errors: dict[str, str]                   # 节点 id -> 失败原因（成功即清），全仓唯一一份
+    warnings: list[str]                      # 校验阶段的警告
+
+    def run_node(self, node_id, config=None) -> NodeResult
+    def run_all(self, on_node_done=None) -> dict[str, NodeResult]
+    def close(self) -> None
+```
+
+- 构造 `Execution(workflow, registry)` 时建全部实例（逐个触发 `node_create_before` / `node_create_after`），`status` 全为 `unrun`。
+- `run_node` 顺序：节点不存在 → 报错；`config` 给了且与当前不同 → `node_create_before` → 校验 → **先构造新实例，构造成功才 `close()` 旧实例并替换**（构造失败则旧实例与 config 原样保留、直接抛错，节点状态不变——否则会留下一个「看着 fresh、其实跑不了」的节点）；**重建成功时该节点的旧输出立即作废**（从 `values`/`results` 里删掉、状态回 `unrun`）：旧输出是用旧参数算的，留着会让下游读到错的数；`node_create_after`；收输入（缺则 `MissingInput`）；`node_invoke_before` → `invoke()` → 校验输出 → `node_end` → 写 `values` → 标 `fresh`，并**递归**把已成为 `fresh` 的下游标 `stale`（从没跑过的保持 `unrun`，否则跑完第一个节点全图都变 stale，状态会骗人）。
+- `run_all` = 按 `order` 逐个 `run_node`，**不发 `run_end`**。
+- `close()` 幂等，关掉全部实例。
+
+两个入口，分开用：
+
+```python
+def execute(registry, path, cli_env=None, hook=None, on_start=None, on_node_done=None) -> Execution
+def run(workflow, registry, on_node_done=None) -> dict[str, NodeResult]
+```
+
+- `execute` 是带钩子的完整驱动：装钩子 → `plugins_loaded` → 读 JSON → `workflow_loaded` → 校验 → 合并 env → `env_ready` → `on_start(execution)` → 建实例 → 钩子有 `serve` 就交给它驱动、没有就 `run_all` → `run_end` → `close`。CLI 的 `run` 子命令走这里；`on_start` 让它在**开跑之前**就能打出警告和 `[开始执行]`，失败运行时这行也不能缺。
+- `run` 保留给「手里已经有校验过的 Workflow」的调用方（Studio 现有代码、smoke、测试）：只跑节点、不发前置三个事件，行为与今天逐字节一致。
+
+引擎侧异常：`RunAborted`（钩子回调抛异常，原异常挂 `__cause__`）、`MissingInput`（缺输入，继承 `ExecutionError`）、`HookError`（钩子路径、缺 `install`、未知事件名）、`ValidationFailed`（带 `report`，CLI 靠它逐条还原 `[错误]`）。
+
+### 9.4 缺输入报错
+
+```
+节点 n3（ml.GradientBoostingRegressor）缺少输入：
+  model  ← 来自 n5「保存模型」，该节点尚未执行
+  data   ← 来自 n1「读取 CSV」，已执行 ✓
+建议：先执行 n5
+```
+
+每行是 `端口 ← 来自 <来源节点>「<节点名>」，<该节点尚未执行|已执行 ✓>`；`建议`取第一个尚未执行的来源。缺输入的节点**状态保持 `unrun`**（它确实没跑过），错误记在该节点的 `error` 字段、命令级 `phase` 为 `failed`。
+
+`run_end` 的 `status`：任一节点状态是 `failed`**或 `errors` 非空**就是 `"failed"`（缺输入这类节点没开跑、只记 `errors` 的情况也算失败）；`serve` 钩子自己吞掉了异常也不例外。`error` 字段只表达「本轮被异常打断」的原因，节点级原因看 `errors`。
+
+### 9.5 官方钩子：`hooks/result_file/`
+
+只注册 `run_end`，把结果写进 `hook_result_path` 指定的 JSON。**`install` 阶段就检查这个变量，没设直接报错退出，不开跑**（别等跑完才抱怨）。真实对象用 `engine.preview.preview()` 转成字符串——JSON 装不下 DataFrame。
+
+```json
+{"status":"ok","error":null,"order":["n1","n2"],
+ "nodes":{"n1":{"duration_ms":12.3,"outputs":{"data":"DataFrame shape=(100, 2)"}}}}
+```
+
+### 9.6 官方钩子：`hooks/http_debug/`
+
+WebSocket 服务，Studio 的调试器直连。引擎启动后**不自动跑任何节点**，一切等命令。
+
+- `hook_port`（可选）：给了就绑这个端口，`0` 或省略由系统分配。
+- `hook_token`（必填，缺则拒绝启动）。
+- `hook_port_file`（必填）：**钩子绑定成功之后**立刻把实际端口写进这个文件（纯文本一行数字）。Studio 以「这个文件出现」作为就绪信号，**不再靠尝试连接端口来判断**——「连得上」不等于「那是自己的子进程」，端口被别的会话占用时会把别人的钩子当成自己的。
+- 地址 `ws://127.0.0.1:<hook_port>/?token=<hook_token>`；token 不符立即关闭连接；带 `Origin` 时必须匹配 `http://127.0.0.1:<任意端口>` 或 `http://localhost:<任意端口>`。
+- 同一时刻只执行一条命令，忙时回 `error`。
+
+命令（客户端 → 服务）：
+
+| 命令 | 含义 | 回应 |
+|---|---|---|
+| `{"cmd":"state"}` | 要状态快照 | `state` |
+| `{"cmd":"run_node","id":"n3","config":{...}}` | 跑一个节点，`config` 可省 | `ack` → `state` |
+| `{"cmd":"continue"}` | 从第一个非 `fresh` 节点顺序跑到结束 | `ack` → `state` |
+| `{"cmd":"stop"}` | 中止当前执行（**在节点之间生效**，正在跑的节点会跑完） | `ack` |
+
+推送（服务 → 客户端）：
+
+```json
+{"type":"state","data":{"phase":"idle","current":null,"order":["n1"],
+  "nodes":{"n1":{"status":"unrun","duration_ms":null,"error":null,"outputs":{}}}}}
+{"type":"log","node":"n1","stream":"stdout","text":"epoch 3/50 ..."}
+{"type":"ack","cmd":"run_node"}
+{"type":"error","message":"节点 n3（ml.X）缺少输入：…"}
+```
+
+节点状态**只有 `state` 一条通道**：不再有独立的 `event` 推送（`node_end` 的全部信息——`status`/`duration_ms`/`outputs`/`error`——都在节点级 `state` 里，两套就是漂移的起点）。§9.2 的 `node_end` **引擎事件**照旧，那是给所有钩子用的。
+
+- `phase`：`idle | running | paused | ended | failed`。
+- `state` 推送时机**三种各一次**：命令开始（`phase=running`）、每个节点结束后、命令/整轮结束（回到 `idle`/`paused`/`ended`/`failed`）。否则 `running` 这个相位永远不会出现，客户端只能自己再造一套「在途」判断。
+- `POST http://127.0.0.1:<hook_port>/shutdown` → 钩子退出；Studio 关图时先发这个，3 秒后 `kill` 子进程兜底。钩子侧最多等当前节点 **1.5 秒**，超时直接退出（所以跑得久的节点会被 Studio 的 kill 收掉，这是预期）。该接口只认**单个 TCP 包内**的请求行，不处理分片——本机 Studio 调用满足这个前提。
+- **日志捕获是进程级 fd 重定向**（不是替换 `sys.stdout`）：`os.pipe()` + `os.dup2` 接管 fd 1/2，两个读线程按 UTF-8（`errors="replace"`）解码、按 `\n` 与 `\r` 都切行、剥 ANSI 转义码、同节点 500ms 内连续 `\r` 只留最后一条；待发送队列最多 5000 行，客户端积压时丢最旧的——读线程绝不阻塞管道。日志**从客户端连上之后开始推送，之前的输出不补发**（面板一开就连上，实际只会丢掉引擎开跑前那一两行）。启动前必须先关缓冲（`PYTHONUNBUFFERED=1` + `line_buffering=True`），否则日志会攒成大块延迟吐出。`node` 为当前正在跑的节点，节点外为 `null`。
+
+### 9.7 版本边界
+
+v1 一个钩子、无断点（"继续"就是跑到结束）、调试期间不许改图结构（子进程里是快照），只能改参数。多钩子串联留到输入输出结构能保证一致时再做。

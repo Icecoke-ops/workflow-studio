@@ -6,6 +6,7 @@
 """
 
 import csv
+import ctypes
 import json
 import os
 import random
@@ -19,6 +20,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+import zipfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -26,18 +28,28 @@ sys.path.insert(0, str(ROOT))
 
 from engine import __version__ as ENGINE_VERSION  # noqa: E402
 from engine.registry import Registry  # noqa: E402
+from studio import debug as debug_module  # noqa: E402
 from studio import server as server_module  # noqa: E402
 from studio.contract import (  # noqa: E402
     ApiService,
+    check_debug_start,
+    check_debug_stop,
     check_health,
     check_plugins,
     check_run,
     check_validate,
 )
+from studio.debug import DebugManager  # noqa: E402
 from studio.server import EngineService, StudioServer  # noqa: E402
 from tools.build_plugins import build_all  # noqa: E402
+from websockets.sync.client import connect as ws_connect  # noqa: E402
 
 DEMO = ROOT / "workflows" / "regression_demo.json"
+DEBUG_DIR = Path(tempfile.gettempdir()) / "workflow-studio"
+
+
+def debug_path(session, suffix):
+    return DEBUG_DIR / f"debug_{session}.{suffix}"
 
 
 def check(condition, message):
@@ -61,6 +73,100 @@ def wait_health(base, timeout=10.0):
         except Exception:
             time.sleep(0.1)
     return None
+
+
+def port_open(port, timeout=0.3):
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+
+def wait_port_closed(port, timeout=5.0):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if not port_open(port):
+            return True
+        time.sleep(0.1)
+    return False
+
+
+def pid_alive(pid):
+    """进程还在吗：Windows 用 OpenProcess 探测，其余平台 os.kill(pid, 0)。"""
+    if os.name != "nt":
+        try:
+            os.kill(pid, 0)
+            return True
+        except OSError:
+            return False
+    api = _winapi()
+    handle = api.OpenProcess(0x00100000, 0, pid)  # SYNCHRONIZE
+    if not handle:
+        return False
+    api.CloseHandle(handle)
+    return True
+
+
+def wait_pid_gone(pid, timeout=5.0):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if not pid_alive(pid):
+            return True
+        time.sleep(0.1)
+    return not pid_alive(pid)
+
+
+class PROCESSENTRY32(ctypes.Structure):
+    _fields_ = [
+        ("dwSize", ctypes.c_uint32),
+        ("cntUsage", ctypes.c_uint32),
+        ("th32ProcessID", ctypes.c_uint32),
+        ("th32DefaultHeapID", ctypes.c_void_p),
+        ("th32ModuleID", ctypes.c_uint32),
+        ("cntThreads", ctypes.c_uint32),
+        ("th32ParentProcessID", ctypes.c_uint32),
+        ("pcPriClassBase", ctypes.c_long),
+        ("dwFlags", ctypes.c_uint32),
+        ("szExeFile", ctypes.c_char * 260),
+    ]
+
+
+def _winapi():
+    """kernel32 签名；不设 restype 的话 64 位句柄会被截断。"""
+    api = ctypes.WinDLL("kernel32", use_last_error=True)
+    api.CreateToolhelp32Snapshot.argtypes = (ctypes.c_uint32, ctypes.c_uint32)
+    api.CreateToolhelp32Snapshot.restype = ctypes.c_void_p
+    api.Process32First.argtypes = (ctypes.c_void_p, ctypes.c_void_p)
+    api.Process32First.restype = ctypes.c_int
+    api.Process32Next.argtypes = (ctypes.c_void_p, ctypes.c_void_p)
+    api.Process32Next.restype = ctypes.c_int
+    api.OpenProcess.argtypes = (ctypes.c_uint32, ctypes.c_int, ctypes.c_uint32)
+    api.OpenProcess.restype = ctypes.c_void_p
+    api.CloseHandle.argtypes = (ctypes.c_void_p,)
+    return api
+
+
+def children_of(parent_pid):
+    """父进程的直接子进程（Windows Toolhelp 快照；WMI 在沙箱里被禁）。"""
+    if os.name != "nt":
+        return []
+    api = _winapi()
+    snapshot = api.CreateToolhelp32Snapshot(0x00000002, 0)  # TH32CS_SNAPPROCESS
+    if not snapshot or snapshot == ctypes.c_void_p(-1).value:
+        return []
+    entry = PROCESSENTRY32()
+    entry.dwSize = ctypes.sizeof(entry)
+    found = []
+    try:
+        ok = api.Process32First(snapshot, ctypes.byref(entry))
+        while ok:
+            if entry.th32ParentProcessID == parent_pid:
+                found.append(entry.th32ProcessID)
+            ok = api.Process32Next(snapshot, ctypes.byref(entry))
+    finally:
+        api.CloseHandle(snapshot)
+    return found
 
 
 class Api:
@@ -503,6 +609,472 @@ def main():
             and "contract.py" not in raw_body,
             "响应体不含异常类名或栈信息",
         )
+
+        # 16) 调试会话：start → WebSocket state → stop → 端口与临时文件清理
+        def debug_roundtrip(verbose):
+            def expect(condition, message):
+                if not condition:
+                    raise AssertionError(message)
+                if verbose:
+                    print(f"[OK] {message}")
+
+            status, _, body = api.json("/api/debug/start", {"workflow": raw})
+            expect(status == 200 and body.get("ok") is True, f"debug start 成功：{body}")
+            expect(check_debug_start(body) == body, "debug start 响应通过 check_debug_start")
+            session = body["session"]
+            port = body["port"]
+            token = body["token"]
+            with ws_connect(
+                f"ws://127.0.0.1:{port}/?token={token}",
+                open_timeout=5,
+                close_timeout=2,
+            ) as websocket:
+                websocket.send(json.dumps({"cmd": "state"}))
+                message = json.loads(websocket.recv(timeout=5))
+            expect(message.get("type") == "state", f"调试 WebSocket 收到 state：{message.get('type')}")
+            status, _, body = api.json("/api/debug/stop", {"session": session})
+            expect(status == 200 and body.get("ok") is True, f"debug stop 成功：{body}")
+            expect(check_debug_stop(body) == body, "debug stop 响应通过 check_debug_stop")
+            expect(wait_port_closed(port), f"stop 后调试端口 {port} 已关闭")
+            expect(not debug_path(session, "json").exists(), "调试工作流临时文件已删除")
+            expect(not debug_path(session, "port").exists(), "调试端口文件已删除")
+
+        debug_roundtrip(verbose=True)
+        # 同一动作连跑 20 次：就绪判定偶发把别人的监听当成自己的钩子，这条能抓住
+        started = time.monotonic()
+        failures = []
+        for _ in range(20):
+            try:
+                debug_roundtrip(verbose=False)
+            except AssertionError as exc:
+                failures.append(str(exc))
+        check(
+            not failures,
+            f"start→state→stop 连跑 20 次全过（{time.monotonic() - started:.1f}s，失败 {len(failures)} 次）",
+        )
+
+        # 17) 未知调试会话
+        status, _, body = api.json("/api/debug/stop", {"session": "no-such-session"})
+        check(
+            status == 200 and body.get("ok") is False and bool(body.get("errors")),
+            f"未知 session 回 ok:false：{body}",
+        )
+        check(check_debug_stop(body) == body, "未知 session 响应通过 check_debug_stop")
+
+        # 18) 同一时刻只允许一个调试会话：第二次 start 关掉第一个
+        status, _, first = api.json("/api/debug/start", {"workflow": raw})
+        status, _, second = api.json("/api/debug/start", {"workflow": raw})
+        check(first.get("ok") and second.get("ok"), "连续两次 debug start 都成功")
+        check(wait_port_closed(first["port"]), f"第一个调试端口 {first['port']} 已关闭")
+        check(port_open(second["port"]), f"第二个调试端口 {second['port']} 可连")
+        check(not debug_path(first["session"], "port").exists(), "第一个会话的端口文件已删除")
+        check(debug_path(second["session"], "port").exists(), "第二个会话的端口文件已落盘")
+        status, _, body = api.json("/api/debug/stop", {"session": second["session"]})
+        check(status == 200 and body.get("ok") is True, "第二个调试会话已停止")
+
+        # 19) 超时路径：钩子起了但不监听 → 10 秒超时、无残留
+        slow_hook = temp / "slow_hook"
+        slow_hook.mkdir()
+        (slow_hook / "hook.py").write_text(
+            "import time\n\n\n"
+            "def install(ctx):\n"
+            "    pass\n\n\n"
+            "def serve(execution):\n"
+            "    time.sleep(60)\n",
+            encoding="utf-8",
+        )
+        slow = DebugManager(hook_dir=slow_hook)
+        before = sorted(DEBUG_DIR.glob("debug_*"))
+        try:
+            started = time.monotonic()
+            result = slow.start(raw)
+            elapsed = time.monotonic() - started
+        finally:
+            slow.shutdown()
+        check(result.get("ok") is False, f"超时调试 start 回 ok:false：{result.get('errors')}")
+        check(check_debug_start(result) == result, "超时响应通过 check_debug_start")
+        check(elapsed >= 9.5, f"确实等到 10 秒超时（{elapsed:.1f}s）")
+        check(
+            any("端口文件" in item for item in result["errors"]),
+            f"超时错误含原因：{result['errors']}",
+        )
+        check(slow.active is False, "超时后没有活动会话")
+        check(
+            sorted(DEBUG_DIR.glob("debug_*")) == before,
+            "超时后无调试临时文件残留",
+        )
+
+        # 20) 假监听不被当成就绪：端口被别人的监听占着时必须失败，不能回 ok:true
+        foreign = socket.socket()
+        foreign.bind(("127.0.0.1", 0))
+        foreign.listen()
+        foreign_port = foreign.getsockname()[1]
+        # 旧实现自己挑端口、再用「连得上」判定就绪；这里把候选端口钉在假监听上。
+        # 修复后 _free_port 已删除，这行不再被调用——旧实现会把假监听当成自己的钩子。
+        legacy_free_port = getattr(debug_module, "_free_port", None)
+        debug_module._free_port = lambda: foreign_port
+        faked = DebugManager(hook_dir=slow_hook)
+        before = sorted(DEBUG_DIR.glob("debug_*"))
+        try:
+            started = time.monotonic()
+            result = faked.start(raw)
+            elapsed = time.monotonic() - started
+        finally:
+            faked.shutdown()
+            if legacy_free_port is None:
+                del debug_module._free_port
+            else:
+                debug_module._free_port = legacy_free_port
+            foreign.close()
+        check(result.get("ok") is False, f"假监听没被当成就绪：{result}")
+        check(check_debug_start(result) == result, "假监听响应通过 check_debug_start")
+        check(elapsed >= 9.5, f"假监听路径等满超时（{elapsed:.1f}s）")
+        check(faked.active is False, "假监听失败后没有活动会话")
+        check(
+            sorted(DEBUG_DIR.glob("debug_*")) == before,
+            "假监听失败后无调试临时文件残留",
+        )
+
+        # 21) 子进程提前崩：钩子路径不存在 → 快速失败并带 stderr 尾部
+        broken = DebugManager(hook_dir=temp / "no_such_hook")
+        before = sorted(DEBUG_DIR.glob("debug_*"))
+        started = time.monotonic()
+        result = broken.start(raw)
+        elapsed = time.monotonic() - started
+        check(result.get("ok") is False, "崩溃调试 start 回 ok:false")
+        check(check_debug_start(result) == result, "崩溃响应通过 check_debug_start")
+        check(elapsed < 8, f"提前崩溃没有等满超时（{elapsed:.1f}s）")
+        check(
+            any("钩子" in item or "不存在" in item for item in result["errors"]),
+            f"错误带子进程 stderr：{result['errors']}",
+        )
+        check(broken.active is False, "崩溃后没有活动会话")
+        check(
+            sorted(DEBUG_DIR.glob("debug_*")) == before,
+            "崩溃后无调试临时文件残留",
+        )
+
+        # 22) 真实 Studio 进程把 --plugins-dir / -e 透传给调试子进程
+        probe_src = temp / "probe_src"
+        probe_plugins = temp / "probe_plugins"
+        probe_src.mkdir()
+        probe_plugins.mkdir()
+        (probe_src / "__init__.py").write_text("", encoding="utf-8")
+        (probe_src / "components.py").write_text(
+            "import os\n\n"
+            "from engine.api import Component\n\n"
+            "PLUGIN_NAME = 'probe'\n"
+            "PLUGIN_VERSION = '0.1'\n"
+            "PLUGIN_TITLE = '透传探针'\n\n\n"
+            "class Probe(Component):\n"
+            "    name = 'Probe'\n"
+            "    title = '透传探针'\n"
+            "    desc = '验证 --plugins-dir 与 -e 透传'\n\n"
+            "    @staticmethod\n"
+            "    def config_schema():\n"
+            "        return {}\n\n"
+            "    @staticmethod\n"
+            "    def input_schema():\n"
+            "        return {}\n\n"
+            "    @staticmethod\n"
+            "    def output_schema():\n"
+            "        return {'out': {'type': 'std_1.0@string', 'title': '标记'}}\n\n"
+            "    def __init__(self, config):\n"
+            "        del config\n"
+            "        if os.environ.get('PROBE_FLAG') != 'yes':\n"
+            "            raise RuntimeError('PROBE_FLAG 没有透传到调试子进程')\n\n"
+            "    def invoke(self):\n"
+            "        return {'out': 'ok'}\n\n\n"
+            "COMPONENTS = [Probe]\n",
+            encoding="utf-8",
+        )
+        with zipfile.ZipFile(
+            probe_plugins / "probe.zip", "w", zipfile.ZIP_DEFLATED
+        ) as archive:
+            archive.write(probe_src / "__init__.py", "probe/__init__.py")
+            archive.write(probe_src / "components.py", "probe/components.py")
+
+        probe_port = free_port()
+        probe_studio = subprocess.Popen(
+            [
+                sys.executable,
+                "-m",
+                "studio",
+                "--port",
+                str(probe_port),
+                "--plugins-dir",
+                str(probe_plugins),
+                "-e",
+                "PROBE_FLAG=yes",
+            ],
+            cwd=str(ROOT),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        try:
+            probe_health = wait_health(f"http://127.0.0.1:{probe_port}", timeout=10)
+            check(
+                probe_health is not None and probe_health["plugins"] == 7,
+                f"探针 Studio 健康检查 {probe_health}",
+            )
+            probe_api = Api(f"http://127.0.0.1:{probe_port}")
+            probe_workflow = {
+                "name": "probe",
+                "nodes": [
+                    {
+                        "id": "p1",
+                        "plugin": "probe",
+                        "component": "Probe",
+                        "config": {},
+                        "inputs": {},
+                    }
+                ],
+            }
+            status, _, body = probe_api.json(
+                "/api/debug/start", {"workflow": probe_workflow}
+            )
+            check(
+                status == 200 and body.get("ok") is True,
+                f"透传后调试子进程启动成功：{body.get('errors')}",
+            )
+            status, _, body = probe_api.json(
+                "/api/debug/stop", {"session": body["session"]}
+            )
+            check(status == 200 and body.get("ok") is True, "透传调试会话已停止")
+        finally:
+            probe_studio.terminate()
+            try:
+                probe_studio.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                probe_studio.kill()
+                probe_studio.wait()
+        check(probe_studio.returncode is not None, "探针 Studio 进程已退出")
+
+        # 23) 父进程被强杀：Windows Job Object 带着调试子进程一起退出
+        if os.name == "nt":
+            doomed_port = free_port()
+            doomed = subprocess.Popen(
+                [sys.executable, "-m", "studio", "--port", str(doomed_port)],
+                cwd=str(ROOT),
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            session_id = None
+            child_port = None
+            try:
+                check(
+                    wait_health(f"http://127.0.0.1:{doomed_port}", timeout=10) is not None,
+                    f"强杀用例 Studio 启动成功（端口 {doomed_port}）",
+                )
+                status, _, body = Api(f"http://127.0.0.1:{doomed_port}").json(
+                    "/api/debug/start", {"workflow": raw}
+                )
+                check(status == 200 and body.get("ok") is True, "强杀用例 debug start 成功")
+                session_id = body["session"]
+                child_port = body["port"]
+                child_pids = children_of(doomed.pid)
+                check(len(child_pids) == 1, f"找到调试子进程 PID {child_pids}")
+                doomed.terminate()  # 直接杀父进程，不触发任何清理
+                doomed.wait(timeout=10)
+                check(
+                    wait_port_closed(child_port, timeout=5),
+                    f"父进程被强杀后调试端口 {child_port} 5 秒内关闭",
+                )
+                check(
+                    wait_pid_gone(child_pids[0], timeout=5),
+                    f"调试子进程 {child_pids[0]} 随父进程退出，没有残留",
+                )
+            finally:
+                if doomed.poll() is None:
+                    doomed.kill()
+                    doomed.wait(timeout=10)
+                if session_id:
+                    # 强杀父进程来不及清理：两个临时文件都要手工删掉
+                    for suffix in ("json", "port"):
+                        debug_path(session_id, suffix).unlink(missing_ok=True)
+
+        # 24) 同端口起第二个 Studio：非 0 退出，stderr 说明无法监听
+        holder_port = free_port()
+        holder = subprocess.Popen(
+            [sys.executable, "-m", "studio", "--port", str(holder_port)],
+            cwd=str(ROOT),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        try:
+            check(
+                wait_health(f"http://127.0.0.1:{holder_port}", timeout=10) is not None,
+                f"占用端口 {holder_port} 的 Studio 已启动",
+            )
+            err_path = temp / "dup.err"
+            with err_path.open("wb") as err_file:
+                duplicate = subprocess.run(
+                    [sys.executable, "-m", "studio", "--port", str(holder_port)],
+                    cwd=str(ROOT),
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,
+                    stderr=err_file,
+                    env=dict(os.environ, PYTHONIOENCODING="utf-8"),
+                    timeout=30,
+                )
+            err_text = err_path.read_text(encoding="utf-8", errors="replace").strip()
+            check(
+                duplicate.returncode != 0,
+                f"同端口第二个 Studio 启动失败（exit {duplicate.returncode}）",
+            )
+            check("无法监听" in err_text, f"stderr 说明无法监听：{err_text}")
+        finally:
+            holder.terminate()
+            try:
+                holder.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                holder.kill()
+                holder.wait(timeout=10)
+
+        # 25) shutdown 之后的 start 直接拒绝：挡住 server_close 与在飞 start 的竞态
+        closed_manager = DebugManager()
+        closed_manager.shutdown()
+        before = sorted(DEBUG_DIR.glob("debug_*"))
+        refused = closed_manager.start(raw)
+        after = sorted(DEBUG_DIR.glob("debug_*"))
+        check(
+            refused == {"ok": False, "errors": ["调试管理器已关闭"]},
+            f"shutdown 后 start 被拒绝：{refused}",
+        )
+        check(check_debug_start(refused) == refused, "拒绝响应通过 check_debug_start")
+        check(after == before, "被拒绝的 start 不写临时文件")
+
+        # 26) Studio 不在仓库根启动：${workspace} 与相对 --plugins-dir 都按启动目录走
+        startup = temp / "startup"
+        rel_plugins = startup / "rel_plugins"
+        rel_plugins.mkdir(parents=True)
+        marker = "REL-WORKSPACE-MARKER-7f3a"
+        (startup / "rel_marker.txt").write_text(marker + "\n", encoding="utf-8")
+        relprobe_src = temp / "relprobe_src"
+        relprobe_src.mkdir()
+        (relprobe_src / "__init__.py").write_text("", encoding="utf-8")
+        (relprobe_src / "components.py").write_text(
+            "from engine.api import Component, expand_env\n\n"
+            "PLUGIN_NAME = 'relprobe'\n"
+            "PLUGIN_VERSION = '0.1'\n"
+            "PLUGIN_TITLE = '启动目录探针'\n\n\n"
+            "class ReadMarker(Component):\n"
+            "    name = 'ReadMarker'\n"
+            "    title = '读取标记文件'\n"
+            "    desc = '用 ${workspace} 读文件，验证调试子进程的 workspace'\n\n"
+            "    @staticmethod\n"
+            "    def config_schema():\n"
+            "        return {'path': {'type': 'string', 'title': '文件', 'required': True}}\n\n"
+            "    @staticmethod\n"
+            "    def input_schema():\n"
+            "        return {}\n\n"
+            "    @staticmethod\n"
+            "    def output_schema():\n"
+            "        return {'content': {'type': 'std_1.0@string', 'title': '内容'}}\n\n"
+            "    def __init__(self, config):\n"
+            "        self.path = expand_env(config['path'])\n\n"
+            "    def invoke(self):\n"
+            "        with open(self.path, encoding='utf-8') as handle:\n"
+            "            return {'content': handle.read().strip()}\n\n\n"
+            "COMPONENTS = [ReadMarker]\n",
+            encoding="utf-8",
+        )
+        with zipfile.ZipFile(rel_plugins / "relprobe.zip", "w", zipfile.ZIP_DEFLATED) as archive:
+            archive.write(relprobe_src / "__init__.py", "relprobe/__init__.py")
+            archive.write(relprobe_src / "components.py", "relprobe/components.py")
+        rel_workflow = {
+            "name": "rel-workspace",
+            "nodes": [
+                {
+                    "id": "p1",
+                    "plugin": "relprobe",
+                    "component": "ReadMarker",
+                    "config": {"path": "${workspace}/rel_marker.txt"},
+                    "inputs": {},
+                }
+            ],
+        }
+        existing_pythonpath = os.environ.get("PYTHONPATH")
+        rel_env = dict(
+            os.environ,
+            PYTHONPATH=str(ROOT)
+            + (os.pathsep + existing_pythonpath if existing_pythonpath else ""),
+        )
+        rel_env.pop("workspace", None)  # 启动目录由子进程自己的 cwd 决定
+        rel_port = free_port()
+        rel_studio = subprocess.Popen(
+            [
+                sys.executable,
+                "-m",
+                "studio",
+                "--port",
+                str(rel_port),
+                "--plugins-dir",
+                "rel_plugins",
+            ],
+            cwd=str(startup),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            env=rel_env,
+        )
+        try:
+            rel_health = wait_health(f"http://127.0.0.1:{rel_port}", timeout=10)
+            check(
+                rel_health is not None and rel_health["plugins"] == 7,
+                f"启动目录 Studio 用相对插件目录加载到 7 个插件：{rel_health}",
+            )
+            rel_api = Api(f"http://127.0.0.1:{rel_port}")
+            status, _, body = rel_api.json("/api/run", {"workflow": rel_workflow})
+            check(
+                status == 200 and body.get("ok") is True,
+                f"启动目录 Studio 的 /api/run 成功：{body.get('errors')}",
+            )
+            run_content = body["nodes"][0]["outputs"]["content"]
+            check(marker in run_content, f"/api/run 读到启动目录的文件：{run_content}")
+
+            status, _, body = rel_api.json("/api/debug/start", {"workflow": rel_workflow})
+            check(
+                status == 200 and body.get("ok") is True,
+                f"启动目录 Studio 的 debug start 成功：{body.get('errors')}",
+            )
+            rel_session = body["session"]
+            try:
+                with ws_connect(
+                    f"ws://127.0.0.1:{body['port']}/?token={body['token']}",
+                    open_timeout=5,
+                    close_timeout=2,
+                ) as websocket:
+                    websocket.send(json.dumps({"cmd": "run_node", "id": "p1"}))
+                    deadline = time.monotonic() + 10
+                    debug_state = None
+                    while debug_state is None and time.monotonic() < deadline:
+                        message = json.loads(websocket.recv(timeout=5))
+                        if message.get("type") == "error":
+                            raise AssertionError(f"调试 run_node 失败：{message.get('message')}")
+                        if message.get("type") != "state":
+                            continue
+                        data = message["data"]
+                        if data["nodes"].get("p1", {}).get("status") == "fresh":
+                            debug_state = data
+                    check(debug_state is not None, "调试子进程 run_node p1 完成")
+                debug_content = debug_state["nodes"]["p1"]["outputs"]["content"]
+                check(marker in debug_content, f"调试子进程读到启动目录的文件：{debug_content}")
+                check(debug_content == run_content, "/api/run 与调试子进程指向同一个文件")
+            finally:
+                status, _, body = rel_api.json("/api/debug/stop", {"session": rel_session})
+                check(status == 200 and body.get("ok") is True, "启动目录调试会话已停止")
+        finally:
+            rel_studio.terminate()
+            try:
+                rel_studio.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                rel_studio.kill()
+                rel_studio.wait()
+        check(rel_studio.returncode is not None, "启动目录 Studio 已退出")
 
         print("\nALL OK")
         return 0
