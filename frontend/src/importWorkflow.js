@@ -2,6 +2,7 @@
 
 import { readAddition } from './addition.js'
 import { defaultsFor } from './model.js'
+import { membersOf, pruneGroups } from './groups.js'
 
 const FALLBACK_COLOR = '#909399'
 
@@ -152,7 +153,6 @@ export function planImport(raw, { componentFor, typeDescs = {}, typeColors = {} 
   const fallbackPositions = layoutPositions(items)
   const additionInfo = readAddition(raw)
   const savedPositions = additionInfo.positions
-  const groups = additionInfo.groups
   const created = []
   const missing = []
 
@@ -177,6 +177,16 @@ export function planImport(raw, { componentFor, typeDescs = {}, typeColors = {} 
       data: buildNodeData(entry, config, { typeDescs, typeColors }),
     })
   }
+
+  // 分组只留成员真实存在的部分：成员全失效的整组丢掉，部分失效的裁掉成员
+  const rawGroups = additionInfo.groups
+  const groups = pruneGroups(rawGroups, created)
+  const rawById = new Map(rawGroups.map((group) => [group.id, group]))
+  let trimmedMembers = 0
+  for (const group of groups) {
+    trimmedMembers += membersOf(rawById.get(group.id)).length - membersOf(group).length
+  }
+  const prunedGroups = rawGroups.length - groups.length
 
   const nodeById = new Map(created.map((node) => [node.id, node]))
   const inputsTaken = new Set()
@@ -220,6 +230,8 @@ export function planImport(raw, { componentFor, typeDescs = {}, typeColors = {} 
     edges,
     groups,
     droppedGroups: additionInfo.droppedGroups,
+    prunedGroups,
+    trimmedMembers,
     skipped,
     missing,
   }

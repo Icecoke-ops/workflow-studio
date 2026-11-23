@@ -14,7 +14,7 @@ import os
 import threading
 
 from engine.errors import ExecutionError
-from engine.preview import preview
+from engine.preview import detail, preview
 
 from .fdlog import FdLog
 from .server import Server
@@ -22,6 +22,9 @@ from .server import Server
 DRAIN_MAX = 0.1  # 节点切换前排空最多等这么久，空闲节点零等待
 
 _debugger = None
+
+# values 里可能有真实值 None，取不到时不能拿 None 当哨兵
+_MISSING = object()
 
 
 def install(ctx):
@@ -94,6 +97,9 @@ class _Debugger:
         if name == "stop":
             self._abort.set()
             client.send({"type": "ack", "cmd": "stop"})
+            return
+        if name == "inspect":
+            self._inspect(client, message)
             return
         if busy:
             client.send({"type": "error", "message": "正在执行"})
@@ -252,3 +258,36 @@ class _Debugger:
             "order": list(execution.order),
             "nodes": nodes,
         }
+
+    def _inspect(self, client, message):
+        """只读：按工作流连线从 ``execution.values`` 取上游已产出的值。
+
+        不执行节点、不写状态、不占 ``_busy``。``list(...)`` 只做一次快照，
+        worker 同时增删 ``values`` 也不会让遍历中途失败。
+        """
+        node_id = message.get("id")
+        node = (
+            self.execution.workflow.nodes.get(node_id)
+            if isinstance(node_id, str)
+            else None
+        )
+        if node is None:
+            client.send({"type": "error", "message": f"未知节点：{node_id}"})
+            return
+
+        values = self.execution.values
+        inputs = {}
+        for port, source in node.inputs.items():
+            value = values.get(source, _MISSING)
+            if value is not _MISSING:
+                inputs[port] = detail(value)
+        outputs = {}
+        for (owner, port), value in list(values.items()):
+            if owner == node_id:
+                outputs[port] = detail(value)
+        client.send(
+            {
+                "type": "inspect",
+                "data": {"node": node_id, "inputs": inputs, "outputs": outputs},
+            }
+        )

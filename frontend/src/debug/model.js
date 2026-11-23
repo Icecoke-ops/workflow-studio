@@ -10,7 +10,6 @@ export const EMPTY_VIEW = Object.freeze({
 })
 
 const PHASES = ['idle', 'running', 'paused', 'ended', 'failed']
-const STATUSES = ['unrun', 'fresh', 'stale', 'failed']
 
 const PHASE_LABELS = {
   idle: '空闲',
@@ -20,8 +19,20 @@ const PHASE_LABELS = {
   failed: '已失败',
 }
 
+const STATUS_LABELS = {
+  unrun: '未运行',
+  fresh: '已运行',
+  stale: '已过期',
+  failed: '失败',
+}
+
 export function phaseLabel(phase) {
   return PHASE_LABELS[phase] || '未知'
+}
+
+/** 节点状态 -> 面板里的中文标签；未知按未运行。 */
+export function statusLabel(status) {
+  return Object.hasOwn(STATUS_LABELS, status) ? STATUS_LABELS[status] : STATUS_LABELS.unrun
 }
 
 /** 有命令在执行；此时不接受新的 run_node / continue。 */
@@ -32,24 +43,41 @@ export function isBusy(phase) {
 /** 节点状态 -> 卡片 class；非调试态（null）不挂 class，未知状态按 unrun 处理。 */
 export function nodeStatusClass(status) {
   if (status === null || status === undefined || status === '') return ''
-  return `status-${STATUSES.includes(status) ? status : 'unrun'}`
+  return `status-${normalizeStatus(status)}`
 }
 
 function normalizeStatus(status) {
-  return STATUSES.includes(status) ? status : 'unrun'
+  return Object.hasOwn(STATUS_LABELS, status) ? status : 'unrun'
 }
 
-/** 合并一份 state 快照：节点表整体替换，只留节点状态（其余字段界面不读）。 */
+/** outputs 只收「端口名 -> 字符串预览」；非对象、数组、非字符串值一律丢掉。 */
+function normalizeOutputs(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return {}
+  return Object.fromEntries(Object.entries(value).filter(([, text]) => typeof text === 'string'))
+}
+
+/** 节点四件套：状态必留，耗时/错误按类型收，输出留成可渲染的对象。 */
+function normalizeNode(info) {
+  return {
+    status: normalizeStatus(info.status),
+    duration_ms: Number.isFinite(info.duration_ms) ? info.duration_ms : null,
+    error: typeof info.error === 'string' && info.error ? info.error : null,
+    outputs: normalizeOutputs(info.outputs),
+  }
+}
+
+/** 合并一份 state 快照：节点表整体替换，保留状态、耗时、错误和每个端口的输出预览。 */
 export function applyState(view, state) {
   const previous = view && typeof view === 'object' ? view : EMPTY_VIEW
   if (!state || typeof state !== 'object') return previous
 
   const source = state.nodes && typeof state.nodes === 'object' ? state.nodes : {}
-  const nodes = {}
-  for (const [id, info] of Object.entries(source)) {
-    if (!info || typeof info !== 'object') continue
-    nodes[id] = { status: normalizeStatus(info.status) }
-  }
+  // Object.fromEntries 定义自有属性：__proto__ 会被当成普通节点 id，而不是原型 setter
+  const nodes = Object.fromEntries(
+    Object.entries(source)
+      .filter(([, info]) => info && typeof info === 'object' && !Array.isArray(info))
+      .map(([id, info]) => [id, normalizeNode(info)]),
+  )
 
   return {
     phase: PHASES.includes(state.phase) ? state.phase : previous.phase,

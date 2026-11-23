@@ -242,6 +242,12 @@ export function projectGraph({ nodes, edges, groups }) {
         type: FRAME,
         position: { x: 0, y: 0 },
         hidden,
+        // frame 的根元素是 0×0（框靠绝对定位的子元素画出来）。两个字段缺一不可：
+        // dimensions 显式写 0×0——parseNode 用 Object.assign 复用同 id 节点，不写就会
+        // 残留组卡片的旧尺寸，取景包围盒被带回原点；同时 0×0 也让 fitView 跳过它。
+        // 可见性靠 style 覆盖：Vue Flow 把 0×0 节点当未初始化，外层会写 visibility:hidden。
+        dimensions: { width: 0, height: 0 },
+        style: { visibility: 'visible' },
         selectable: false,
         draggable: false,
         connectable: false,

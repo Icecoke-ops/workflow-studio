@@ -5,14 +5,13 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import ComponentNode from './components/ComponentNode.vue'
 import CollapsedRail from './components/CollapsedRail.vue'
 import ContextMenu from './components/ContextMenu.vue'
-import DebugPanel from './components/DebugPanel.vue'
 import EnvDrawer from './components/EnvDrawer.vue'
 import GraphCanvas from './components/GraphCanvas.vue'
 import GroupFrame from './components/GroupFrame.vue'
 import GroupNode from './components/GroupNode.vue'
 import Inspector from './components/Inspector.vue'
 import Palette from './components/Palette.vue'
-import ResultPanel from './components/ResultPanel.vue'
+import BottomDock from './components/BottomDock.vue'
 import { readAddition } from './addition'
 import {
   fetchHealth,
@@ -48,6 +47,7 @@ import {
 } from './groups'
 import { buildNodeData, missingNodeData, planImport } from './importWorkflow'
 import { buildWorkflow as modelBuildWorkflow } from './model'
+import { trackPointer } from './pointer'
 import { envError, envToRows } from './workflow'
 
 const TYPE_COLORS = [
@@ -172,16 +172,7 @@ function startResize(panel, event) {
     }
   }
 
-  const onUp = () => {
-    window.removeEventListener('pointermove', onMove)
-    window.removeEventListener('pointerup', onUp)
-    window.removeEventListener('pointercancel', onUp)
-    saveLayout()
-  }
-
-  window.addEventListener('pointermove', onMove)
-  window.addEventListener('pointerup', onUp)
-  window.addEventListener('pointercancel', onUp)
+  trackPointer(onMove, saveLayout)
 }
 
 loadLayout()
@@ -485,7 +476,7 @@ function buildWorkflow() {
     edges: edges.value,
     envRows: workflowEnv.value,
     addition: additionState.value,
-    groups: serializeGroups(groups.value, groupPositions(nodes.value)),
+    groups: serializeGroups(pruneGroups(groups.value, nodes.value), groupPositions(nodes.value)),
   })
 }
 
@@ -541,7 +532,7 @@ async function applyWorkflow(raw) {
   workflowName.value = plan.name
   importEnv(raw)
   additionState.value = addition
-  groups.value = pruneGroups(plan.groups || [], plan.nodes)
+  groups.value = plan.groups
   nodes.value = plan.nodes
   edges.value = plan.edges
   selectedIds.value = []
@@ -558,6 +549,12 @@ async function applyWorkflow(raw) {
       `导入时忽略 ${plan.droppedGroups} 个子图分组（id 为空、重复或与节点冲突）`,
     )
   }
+  const prunedParts = []
+  if (plan.prunedGroups) prunedParts.push(`丢弃 ${plan.prunedGroups} 组`)
+  if (plan.trimmedMembers) prunedParts.push(`移除 ${plan.trimmedMembers} 个成员`)
+  if (prunedParts.length) {
+    ElMessage.warning(`导入时按文件里现有节点裁剪分组：${prunedParts.join('、')}`)
+  }
   if (plan.missing.length) {
     ElMessage.warning(
       `有 ${plan.missing.length} 个组件未加载：${[...new Set(plan.missing)].join(', ')}`,
@@ -572,6 +569,9 @@ async function applyWorkflow(raw) {
   // 而 selection watch 的去重键没变、不会再通知 App，所以这里显式清一次选中态
   // （不传参 = 取消全部节点与边的选中）。
   graphRef.value?.clearSelection?.()
+  // 新节点要等 ResizeObserver 量出尺寸才能取景；ResizeObserver 在同一帧的 rAF 之后
+  // 才回调，所以等两帧再 fitView，否则节点全是 0×0、fitView 直接 no-op。
+  await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)))
   graphRef.value?.fitView?.({ padding: 0.2 })
   return true
 }
@@ -669,8 +669,36 @@ function onDebugError(message) {
   debugError.value = typeof message?.message === 'string' ? message.message : '调试出错'
 }
 
+// inspect 详情：一次只挂一条，回包按节点 id 对上才 resolve；20 秒没回就 reject
+let inspectPending = null
+
+// 唯一结算点：摘 pending、清定时器，再 resolve/reject
+function finishInspect(error, data) {
+  const pending = inspectPending
+  if (!pending) return
+  inspectPending = null
+  clearTimeout(pending.timer)
+  if (error) pending.reject(error)
+  else pending.resolve(data)
+}
+
+function onDebugInspect(data) {
+  if (data?.node === inspectPending?.id) finishInspect(null, data)
+}
+
+function inspectNode(id) {
+  if (!debugClient) return Promise.reject(new Error('调试连接已断开'))
+  return new Promise((resolve, reject) => {
+    finishInspect(new Error('已发起新的详情请求'))
+    const timer = setTimeout(() => finishInspect(new Error('没拿到详情')), 20000)
+    inspectPending = { id, timer, resolve, reject }
+    if (!debugClient.send({ cmd: 'inspect', id })) finishInspect(new Error('调试连接已断开'))
+  })
+}
+
 function onDebugClose() {
   if (!debugActive.value) return
+  finishInspect(new Error('调试进程已退出'))
   ElMessage.warning('调试进程已退出')
   void stopDebug()
 }
@@ -695,6 +723,7 @@ async function startDebug() {
         onState: onDebugState,
         onLog: onDebugLog,
         onError: onDebugError,
+        onInspect: onDebugInspect,
         onClose: onDebugClose,
       },
     })
@@ -705,6 +734,10 @@ async function startDebug() {
     debugLogs.value = []
     debugError.value = ''
     refreshDebugNodes()
+    // 调试面板就在底部 dock 里：展开并切到调试页签
+    layout.value.bottomOpen = true
+    activeTab.value = 'debug'
+    saveLayout()
     client.send({ cmd: 'state' })
   } catch (err) {
     debugClient?.close()
@@ -723,6 +756,7 @@ async function startDebug() {
 
 async function stopDebug() {
   const info = debugSession.value
+  finishInspect(new Error('调试连接已断开'))
   debugClient?.close()
   debugClient = null
   debugSession.value = null
@@ -730,6 +764,8 @@ async function stopDebug() {
   debugLogs.value = []
   debugError.value = ''
   refreshDebugNodes()
+  // 停在调试页签时退回运行结果；在别的页签就不打扰。放在 await 之前，避免收子进程期间用户切页签被覆盖
+  if (activeTab.value === 'debug') activeTab.value = 'run'
   if (info?.session) {
     try {
       await stopDebugSession(info.session)
@@ -919,32 +955,30 @@ onMounted(async () => {
     </main>
 
     <div
-      v-if="debugActive || layout.bottomOpen"
+      v-if="layout.bottomOpen"
       class="resize-handle resize-horizontal"
       title="拖拽调整底部高度"
       @pointerdown="startResize('bottom', $event)"
     />
-    <DebugPanel
-      v-if="debugActive"
-      :view="debugView"
-      :logs="debugLogs"
-      :error="debugError"
-      :style="{ height: layout.bottomHeight + 'px' }"
-      @continue="continueDebug"
-      @stop="stopDebugExecution"
-    />
-    <ResultPanel
-      v-else-if="layout.bottomOpen"
+    <BottomDock
+      v-if="layout.bottomOpen"
       v-model:active-tab="activeTab"
       :report="validateReport"
       :run="runResult"
+      :debug-active="debugActive"
+      :debug-view="debugView"
+      :debug-logs="debugLogs"
+      :debug-error="debugError"
+      :inspect="inspectNode"
       :style="{ height: layout.bottomHeight + 'px' }"
       @collapse="togglePanel('bottom')"
+      @debug-continue="continueDebug"
+      @debug-stop="stopDebugExecution"
     />
     <CollapsedRail
       v-else
       side="bottom"
-      label="运行结果"
+      label="运行与调试"
       @expand="togglePanel('bottom')"
     />
 

@@ -103,14 +103,14 @@ function onTitleClick(event) {
 
     <div class="cnode-body">
       <div class="cnode-ports">
-        <div v-for="i in rowCount" :key="i" class="cnode-row">
-          <div class="cnode-side input">
+        <div v-for="i in rowCount" :key="i" class="port-row">
+          <div class="port-side input">
             <template v-if="data.inPorts[i - 1]">
               <Handle
                 :id="data.inPorts[i - 1].name"
                 type="target"
                 :position="Position.Left"
-                class="cnode-handle"
+                class="port-handle"
                 :style="{
                   background: data.inPorts[i - 1].color,
                   left: '-15px',
@@ -129,7 +129,7 @@ function onTitleClick(event) {
             </template>
           </div>
 
-          <div class="cnode-side output">
+          <div class="port-side output">
             <template v-if="data.outPorts[i - 1]">
               <span
                 class="cnode-type"
@@ -143,7 +143,7 @@ function onTitleClick(event) {
                 :id="data.outPorts[i - 1].name"
                 type="source"
                 :position="Position.Right"
-                class="cnode-handle"
+                class="port-handle"
                 :style="{
                   background: data.outPorts[i - 1].color,
                   right: '-15px',
@@ -377,27 +377,6 @@ function onTitleClick(event) {
   flex: none;
 }
 
-.cnode-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  height: 24px;
-}
-
-.cnode-side {
-  position: relative;
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  flex: 1;
-  min-width: 0;
-}
-
-.cnode-side.output {
-  justify-content: flex-end;
-}
-
 .cnode-port {
   font-size: 11px;
   color: #606266;
@@ -413,14 +392,6 @@ function onTitleClick(event) {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-
-.cnode-handle {
-  width: 10px;
-  height: 10px;
-  border: 2px solid #fff;
-  border-radius: 50%;
-  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.08);
 }
 
 .cnode-scroll {

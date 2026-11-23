@@ -148,10 +148,6 @@ class HeadRows(TableIn):
             }
         }
 
-    @staticmethod
-    def output_schema():
-        return {"table": {"type": "std_1.0@table", "title": "结果表"}}
-
     def __init__(self, config):
         self.n = config["n"]
 

@@ -27,10 +27,6 @@ class SelectColumns(TableIn):
             },
         }
 
-    @staticmethod
-    def output_schema():
-        return {"table": {"type": "std_1.0@table", "title": "结果表"}}
-
     def __init__(self, config):
         self.columns = config["columns"]
         self.strict = config["strict"]
@@ -64,10 +60,6 @@ class DropColumns(TableIn):
             }
         }
 
-    @staticmethod
-    def output_schema():
-        return {"table": {"type": "std_1.0@table", "title": "结果表"}}
-
     def __init__(self, config):
         self.columns = config["columns"]
 
@@ -91,10 +83,6 @@ class RenameColumns(TableIn):
                 "required": True,
             }
         }
-
-    @staticmethod
-    def output_schema():
-        return {"table": {"type": "std_1.0@table", "title": "结果表"}}
 
     def __init__(self, config):
         self.mapping = config["mapping"]
@@ -151,10 +139,6 @@ class CastColumn(TableIn):
                 ],
             },
         }
-
-    @staticmethod
-    def output_schema():
-        return {"table": {"type": "std_1.0@table", "title": "结果表"}}
 
     def __init__(self, config):
         self.column = config["column"]

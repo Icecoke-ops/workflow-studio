@@ -100,6 +100,37 @@ body {
   text-align: center;
 }
 
+/* 端口行：组件卡片与折叠组卡片共用；名字常驻卡内，输入左列、输出右列，超长省略 */
+.port-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  height: 24px;
+}
+
+.port-side {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex: 1;
+  min-width: 0;
+}
+
+.port-side.output {
+  justify-content: flex-end;
+}
+
+/* 带 .vue-flow__handle 提高一级优先级，压过库默认的 handle 尺寸/边框 */
+.vue-flow__handle.port-handle {
+  width: 10px;
+  height: 10px;
+  border: 2px solid #fff;
+  border-radius: 50%;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.08);
+}
+
 /* 滚动条细一点 */
 ::-webkit-scrollbar {
   width: 8px;

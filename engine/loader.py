@@ -224,7 +224,7 @@ def _import_components(zip_path, package):
         raise PluginLoadError(f"{zip_path.name}: 导入 {package}.components 失败：{exc}") from exc
 
 
-def _collect_types(module, package):
+def _collect_types(package):
     types = {}
     # 区分「没有 types.py」和「types.py 里自己的 import 写错了」：
     # 后者必须报出来，不能当成没有 types.py 静默跳过。
@@ -284,7 +284,7 @@ def load_plugin(zip_path, loaded_names):
         name=name,
         version=version,
         title=str(title),
-        types=_collect_types(module, package),
+        types=_collect_types(package),
         components=list(components),
         source=str(zip_path),
     )

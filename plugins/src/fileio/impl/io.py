@@ -1,7 +1,7 @@
 """表格读写：CSV / JSON / Excel。"""
 
-from engine.api import Component, expand_env
-from fileio.impl.base import TableIn
+from engine.api import expand_env
+from fileio.impl.base import ReadTable, TableIn
 
 
 def _path(desc):
@@ -12,7 +12,7 @@ def _fail_write(path, exc):
     raise ValueError(f"写入失败：{path}：{exc}") from exc
 
 
-class LoadCSV(Component):
+class LoadCSV(ReadTable):
     name = "LoadCSV"
     title = "读取 CSV"
     desc = "读取 CSV 文件并转成表格，可切换编码"
@@ -45,14 +45,6 @@ class LoadCSV(Component):
             },
         }
 
-    @staticmethod
-    def input_schema():
-        return {}
-
-    @staticmethod
-    def output_schema():
-        return {"table": {"type": "std_1.0@table", "title": "数据表"}}
-
     def __init__(self, config):
         self.path = expand_env(config["path"])
         self.encoding = config["encoding"]
@@ -72,7 +64,7 @@ class LoadCSV(Component):
         }
 
 
-class LoadJSON(Component):
+class LoadJSON(ReadTable):
     name = "LoadJSON"
     title = "读取 JSON"
     desc = "读取 JSON 文件并把每条记录转成表格行"
@@ -83,14 +75,6 @@ class LoadJSON(Component):
             "path": _path("绝对路径优先；也可写相对路径，支持 ${变量}"),
         }
 
-    @staticmethod
-    def input_schema():
-        return {}
-
-    @staticmethod
-    def output_schema():
-        return {"table": {"type": "std_1.0@table", "title": "数据表"}}
-
     def __init__(self, config):
         self.path = expand_env(config["path"])
 
@@ -100,7 +84,7 @@ class LoadJSON(Component):
         return {"table": pd.read_json(self.path, orient="records")}
 
 
-class LoadExcel(Component):
+class LoadExcel(ReadTable):
     name = "LoadExcel"
     title = "读取 Excel"
     desc = "读取 Excel 工作簿里的一张工作表并转成表格"
@@ -122,14 +106,6 @@ class LoadExcel(Component):
                 "default": True,
             },
         }
-
-    @staticmethod
-    def input_schema():
-        return {}
-
-    @staticmethod
-    def output_schema():
-        return {"table": {"type": "std_1.0@table", "title": "数据表"}}
 
     def __init__(self, config):
         self.path = expand_env(config["path"])
@@ -175,10 +151,6 @@ class SaveCSV(TableIn):
             },
         }
 
-    @staticmethod
-    def output_schema():
-        return {}
-
     def __init__(self, config):
         self.path = expand_env(config["path"])
         self.encoding = config["encoding"]
@@ -214,10 +186,6 @@ class SaveExcel(TableIn):
                 "default": False,
             },
         }
-
-    @staticmethod
-    def output_schema():
-        return {}
 
     def __init__(self, config):
         self.path = expand_env(config["path"])

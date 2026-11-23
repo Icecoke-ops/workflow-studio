@@ -1346,6 +1346,183 @@ def case_http_debug_survives_accept_error():
         real.close()
 
 
+# ---------------------------------------------------------------------------
+# 官方钩子 hooks/http_debug/：inspect 只读命令（契约 9.6）
+# ---------------------------------------------------------------------------
+
+
+class _FakeClient:
+    """只记录收到的报文，不带连接。"""
+
+    def __init__(self):
+        self.sent = []
+
+    def send(self, payload):
+        self.sent.append(payload)
+
+
+def _inspect_fixture():
+    """真 Execution（不建实例、不跑节点）+ 假客户端用不到的 _Debugger。
+
+    工作流：n1 -value-> n2 -result-> n3(twoIn: model<-n1.value, data<-n2.result)。
+    values 堆直接写，模拟「上游已产出」，不经过任何执行路径。
+    """
+    from hooks.http_debug import _Debugger
+
+    workflow = _validated(
+        {
+            "nodes": [
+                _echo("n1", tag="t1"),
+                _sink("n2", "n1"),
+                {
+                    "id": "n3",
+                    "plugin": "hk1",
+                    "component": "TwoIn",
+                    "config": {},
+                    "inputs": {
+                        "model": {"from": "n1", "port": "value"},
+                        "data": {"from": "n2", "port": "result"},
+                    },
+                },
+            ]
+        }
+    )
+    execution = Execution(workflow, get_registry(), build=False)
+    debugger = _Debugger(0, "tok", "")
+    debugger.execution = execution
+    return debugger, execution
+
+
+def case_inspect_only_requester():
+    """两个客户端：只有发命令的那个收到 inspect，另一个一条都没有。"""
+    debugger, execution = _inspect_fixture()
+    execution.values[("n1", "value")] = 7
+    execution.values[("n3", "out")] = "own"
+    requester = _FakeClient()
+    bystander = _FakeClient()
+
+    debugger.dispatch(requester, {"cmd": "inspect", "id": "n3"})
+
+    check(len(requester.sent) == 1, f"请求方应只收到一条报文：{requester.sent}")
+    message = requester.sent[0]
+    check(message.get("type") == "inspect", f"应答类型：{message}")
+    check(bystander.sent == [], f"另一个客户端不应收到任何报文：{bystander.sent}")
+
+
+def case_inspect_read_only():
+    """调用前后 phase/current/busy/values（以及 status/results）快照一致。"""
+    debugger, execution = _inspect_fixture()
+    execution.values.update(
+        {("n1", "value"): 7, ("n2", "result"): 9, ("n3", "out"): "own"}
+    )
+    execution.status["n1"] = "fresh"
+    execution.errors["n2"] = "旧错误"
+    debugger._phase = "paused"
+    debugger._current = "n1"
+    debugger._busy = False
+
+    before = (
+        debugger._phase,
+        debugger._current,
+        debugger._busy,
+        dict(execution.values),
+        dict(execution.status),
+        dict(execution.results),
+        dict(execution.errors),
+    )
+    client = _FakeClient()
+    debugger.dispatch(client, {"cmd": "inspect", "id": "n3"})
+    after = (
+        debugger._phase,
+        debugger._current,
+        debugger._busy,
+        dict(execution.values),
+        dict(execution.status),
+        dict(execution.results),
+        dict(execution.errors),
+    )
+
+    check(len(client.sent) == 1 and client.sent[0]["type"] == "inspect", f"应回应答：{client.sent}")
+    check(after == before, f"inspect 不能改状态：{before} -> {after}")
+    check(not debugger._lock.locked(), "inspect 返回后不能占着锁")
+
+
+def case_inspect_unknown_node():
+    """未知节点按契约报 未知节点：…；非字符串 id 也走同一条错误分支。"""
+    debugger, _execution = _inspect_fixture()
+    client = _FakeClient()
+
+    debugger.dispatch(client, {"cmd": "inspect", "id": "nope"})
+    check(len(client.sent) == 1, f"未知节点应回一条 error：{client.sent}")
+    check(
+        client.sent[0] == {"type": "error", "message": "未知节点：nope"},
+        f"未知节点文案：{client.sent[0]}",
+    )
+
+    for bad_id in (42, None, ["n1"]):
+        client.sent.clear()
+        debugger.dispatch(client, {"cmd": "inspect", "id": bad_id})
+        check(len(client.sent) == 1, f"id={bad_id!r} 应回一条 error：{client.sent}")
+        message = client.sent[0]
+        check(message.get("type") == "error", f"id={bad_id!r} 应回 error：{message}")
+        check(
+            str(message.get("message", "")).startswith("未知节点："),
+            f"id={bad_id!r} 的错误应以 未知节点： 开头：{message.get('message')}",
+        )
+
+
+def case_inspect_while_busy():
+    """忙时 inspect 仍回 inspect，同一时刻 run_node 仍回 正在执行。"""
+    debugger, execution = _inspect_fixture()
+    execution.values[("n1", "value")] = 7
+    debugger._busy = True
+    debugger._phase = "running"
+    debugger._current = "n2"
+    client = _FakeClient()
+
+    debugger.dispatch(client, {"cmd": "inspect", "id": "n3"})
+    check(len(client.sent) == 1, f"忙时 inspect 也有应答：{client.sent}")
+    check(client.sent[0].get("type") == "inspect", f"忙时应答类型：{client.sent[0]}")
+    check(client.sent[0]["data"]["node"] == "n3", f"忙时应答节点：{client.sent[0]}")
+    check(debugger._busy is True, "inspect 不能清掉忙锁")
+    check(debugger._phase == "running", f"inspect 不能改 phase：{debugger._phase}")
+
+    debugger.dispatch(client, {"cmd": "run_node", "id": "n3"})
+    check(
+        client.sent[-1] == {"type": "error", "message": "正在执行"},
+        f"忙时 run_node 应被拒：{client.sent[-1]}",
+    )
+    check(debugger._busy is True, "被拒的 run_node 不能改忙锁")
+
+
+def case_inspect_shape():
+    """inputs 按连线从已产出的 values 取（没值不出现）；outputs 只含本节点端口。"""
+    from engine.preview import detail
+
+    debugger, execution = _inspect_fixture()
+    client = _FakeClient()
+
+    execution.values[("n1", "value")] = 7
+    debugger.dispatch(client, {"cmd": "inspect", "id": "n3"})
+    data = client.sent[-1]["data"]
+    check(set(data) == {"node", "inputs", "outputs"}, f"data 键集：{sorted(data)}")
+    check(data["inputs"] == {"model": detail(7)}, f"只应有已产出的 model：{data['inputs']}")
+    check(data["outputs"] == {}, f"没产出时 outputs 应为空：{data['outputs']}")
+
+    execution.values[("n2", "result")] = 9
+    execution.values[("n3", "out")] = "own"
+    debugger.dispatch(client, {"cmd": "inspect", "id": "n3"})
+    data = client.sent[-1]["data"]
+    check(
+        data["inputs"] == {"model": detail(7), "data": detail(9)},
+        f"两个上游都有值时都应出现：{data['inputs']}",
+    )
+    check(
+        data["outputs"] == {"out": detail("own")},
+        f"outputs 只含本节点端口：{data['outputs']}",
+    )
+
+
 CASES = [
     ("事件顺序：前三个 → 建实例 → 逐节点执行 → run_end", case_event_order),
     ("每个事件的 data 键与 9.2 表一致", case_event_data_keys),
@@ -1370,6 +1547,11 @@ CASES = [
     ("result_file：没设 hook_result_path 启动即失败且不开跑", case_result_file_missing_env),
     ("result_file：运行失败也写 JSON，status=failed", case_result_file_failed),
     ("http_debug：一次 accept 错误后服务仍存活并能应答", case_http_debug_survives_accept_error),
+    ("http_debug：inspect 只回请求方且形状正确", case_inspect_only_requester),
+    ("http_debug：inspect 只读，不执行/不改状态", case_inspect_read_only),
+    ("http_debug：inspect 未知节点 / 非字符串 id 回 error", case_inspect_unknown_node),
+    ("http_debug：忙时 inspect 仍可用，run_node 仍被拒", case_inspect_while_busy),
+    ("http_debug：inspect 的 inputs/outputs 按堆与连线取", case_inspect_shape),
 ]
 
 

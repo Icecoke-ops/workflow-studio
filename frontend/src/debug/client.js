@@ -83,6 +83,9 @@ export class DebugClient {
       case 'ack':
         handlers.onAck?.(message)
         break
+      case 'inspect':
+        handlers.onInspect?.(message.data)
+        break
       case 'error':
         handlers.onError?.(message)
         break

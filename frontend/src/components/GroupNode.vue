@@ -1,7 +1,8 @@
 <script setup>
-import { computed, nextTick, ref } from 'vue'
+import { computed, ref } from 'vue'
 import { Handle, Position, useVueFlow } from '@vue-flow/core'
 import { memberLeaves } from '../groups.js'
+import { useInlineTitle } from '../useInlineTitle.js'
 import ConfigForm from './ConfigForm.vue'
 
 const props = defineProps({
@@ -12,42 +13,10 @@ const props = defineProps({
 
 const { findNode } = useVueFlow()
 
-// 标题就地改名：编辑态自持，提交才交给 App（data.onRename），取消直接丢弃草稿。
-const editing = ref(false)
-const draft = ref('')
-const composing = ref(false)
-const titleInput = ref(null)
-
-async function beginRename() {
-  draft.value = props.data.title || ''
-  editing.value = true
-  await nextTick()
-  titleInput.value?.focus()
-  titleInput.value?.select()
-}
-
-function onCompositionStart() {
-  composing.value = true
-}
-
-function onCompositionEnd() {
-  composing.value = false
-  // 浏览器可能先 blur 后 compositionend：组字结束后若输入框已失焦，补一次提交
-  if (editing.value && titleInput.value !== document.activeElement) commitTitle()
-}
-
-function commitTitle() {
-  if (composing.value || !editing.value) return
-  editing.value = false
-  const title = draft.value.trim()
-  if (!title || title === props.data.title) return
-  props.data.onRename?.(props.data.groupId, title)
-}
-
-function cancelTitle() {
-  if (composing.value) return
-  editing.value = false
-}
+const {
+  editing, draft, titleInput,
+  beginRename, onCompositionStart, onCompositionEnd, commitTitle, cancelTitle,
+} = useInlineTitle(() => props.data)
 
 // 折叠卡片里的成员：一行一个组件，标题即组件自己的标题；参数默认收起。
 const leaves = computed(() =>
@@ -74,23 +43,13 @@ function toggleMember(nodeId) {
   openIds.value = next
 }
 
-const portSides = computed(() =>
-  ['inPorts', 'outPorts'].flatMap((listKey, side) =>
-    (props.data[listKey] || []).map((port, index) => ({
-      key: `${listKey}-${port.name}`,
-      port,
-      index,
-      count: props.data[listKey].length,
-      side: side ? 'right' : 'left',
-      type: side ? 'source' : 'target',
-      position: side ? Position.Right : Position.Left,
-    })),
-  ),
+// 端口行与组件卡片同一套规则：常驻、卡内左右分列、一行一对
+const rowCount = computed(() =>
+  Math.max(props.data.inPorts?.length || 0, props.data.outPorts?.length || 0),
 )
 
-function portStyle(index, count, side) {
-  const top = `${((index + 1) / (count + 1)) * 100}%`
-  return side === 'left' ? { top, left: '-15px' } : { top, right: '-15px', left: 'auto' }
+function portTip(port) {
+  return port.title ? `${port.label}\n${port.title}` : port.label
 }
 </script>
 
@@ -146,31 +105,49 @@ function portStyle(index, count, side) {
     </div>
 
     <div class="gnode-ports">
-      <template v-for="item in portSides" :key="item.key">
-        <div
-          class="gnode-port"
-          :class="item.side"
-          :style="portStyle(item.index, item.count, item.side)"
-        >
-          <Handle
-            :id="item.port.name"
-            :type="item.type"
-            :position="item.position"
-            class="gnode-handle"
-            :style="{
-              position: 'absolute',
-              top: '50%',
-              left: '50%',
-              transform: 'translate(-50%, -50%)',
-              background: item.port.color,
-            }"
-          />
-          <span class="gnode-port-tip">
-            <span class="gnode-port-tip-label">{{ item.port.label }}</span>
-            <span v-if="item.port.title" class="gnode-port-tip-type">{{ item.port.title }}</span>
-          </span>
+      <div v-for="i in rowCount" :key="i" class="port-row">
+        <div class="port-side input">
+          <template v-if="data.inPorts[i - 1]">
+            <Handle
+              :id="data.inPorts[i - 1].name"
+              type="target"
+              :position="Position.Left"
+              class="port-handle gnode-handle"
+              :style="{
+                background: data.inPorts[i - 1].color,
+                left: '-15px',
+                top: '50%',
+                transform: 'translateY(-50%)',
+              }"
+            />
+            <span class="gnode-port" :title="portTip(data.inPorts[i - 1])">
+              {{ data.inPorts[i - 1].label }}
+            </span>
+          </template>
         </div>
-      </template>
+
+        <div class="port-side output">
+          <template v-if="data.outPorts[i - 1]">
+            <span class="gnode-port" :title="portTip(data.outPorts[i - 1])">
+              {{ data.outPorts[i - 1].label }}
+            </span>
+            <Handle
+              :id="data.outPorts[i - 1].name"
+              type="source"
+              :position="Position.Right"
+              class="port-handle gnode-handle"
+              :style="{
+                background: data.outPorts[i - 1].color,
+                right: '-15px',
+                left: 'auto',
+                top: '50%',
+                transform: 'translateY(-50%)',
+              }"
+            />
+          </template>
+        </div>
+      </div>
+      <div v-if="rowCount === 0" class="gnode-empty">无输入 / 输出端口</div>
     </div>
 
     <div class="gnode-scroll nowheel" @wheel.stop>
@@ -293,79 +270,28 @@ function portStyle(index, count, side) {
 }
 
 .gnode-ports {
-  position: absolute;
-  inset: 0;
-  pointer-events: none;
+  flex: none;
+  padding: 2px 10px 0;
 }
 
-/* 端口不进正文布局：圆点挂在卡片边缘，hover 时才在卡片外侧显示文字提示 */
+/* 组件卡片用 max-width: 70px 截断；组端口名是「组件标题.端口名」，更宽，
+   所以让名字占满本列（flex:1）再省略，完整名字留在 title 里 */
 .gnode-port {
-  position: absolute;
-  width: 10px;
-  height: 10px;
-  transform: translateY(-50%);
-  pointer-events: all;
+  flex: 1;
+  min-width: 0;
+  font-size: 11px;
+  color: #606266;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-.gnode-port.left {
-  left: -15px;
-}
-
-.gnode-port.right {
-  right: -15px;
+.port-side.output .gnode-port {
+  text-align: right;
 }
 
 .gnode-handle {
   pointer-events: all;
-  width: 10px;
-  height: 10px;
-  border: 2px solid #fff;
-}
-
-.gnode-port-tip {
-  display: none;
-  position: absolute;
-  top: 50%;
-  transform: translateY(-50%);
-  max-width: 190px;
-  padding: 3px 7px;
-  border-radius: 5px;
-  background: rgba(40, 40, 48, 0.94);
-  color: #fff;
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.18);
-  pointer-events: none;
-  z-index: 2;
-}
-
-.gnode-port.left .gnode-port-tip {
-  right: 18px;
-  text-align: right;
-}
-
-.gnode-port.right .gnode-port-tip {
-  left: 18px;
-}
-
-.gnode-port:hover .gnode-port-tip {
-  display: block;
-}
-
-.gnode-port-tip-label {
-  display: block;
-  max-width: 190px;
-  font-size: 11px;
-  line-height: 15px;
-  font-weight: 600;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.gnode-port-tip-type {
-  display: block;
-  color: #d7d7e0;
-  font-size: 10px;
-  line-height: 14px;
 }
 
 .gnode-scroll {

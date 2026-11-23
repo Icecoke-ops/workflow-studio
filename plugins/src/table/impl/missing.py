@@ -50,10 +50,6 @@ class FillMissing(TableIn):
             },
         }
 
-    @staticmethod
-    def output_schema():
-        return {"table": {"type": "std_1.0@table", "title": "结果表"}}
-
     def __init__(self, config):
         self.columns = config["columns"]
         self.strategy = config["strategy"]
@@ -130,10 +126,6 @@ class DropMissing(TableIn):
                 ],
             },
         }
-
-    @staticmethod
-    def output_schema():
-        return {"table": {"type": "std_1.0@table", "title": "结果表"}}
 
     def __init__(self, config):
         self.columns = config["columns"]

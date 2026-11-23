@@ -30,20 +30,12 @@ def _plugin():
     return PLUGIN_NAME, PLUGIN_VERSION
 
 
-class SaveModel(Component):
-    name = "SaveModel"
-    title = "保存模型"
-    desc = "保存模型到文件，并原样传给下游节点"
+class _Persist(Component):
+    """保存和加载共用：同一个路径配置、同一个模型输出端口。"""
 
     @staticmethod
     def config_schema():
         return {"path": _path_schema()}
-
-    @staticmethod
-    def input_schema():
-        return {
-            "model": {"types": ["std_1.0@model"], "required": True, "title": "模型"}
-        }
 
     @staticmethod
     def output_schema():
@@ -51,6 +43,18 @@ class SaveModel(Component):
 
     def __init__(self, config):
         self.path = expand_env(config["path"])
+
+
+class SaveModel(_Persist):
+    name = "SaveModel"
+    title = "保存模型"
+    desc = "保存模型到文件，并原样传给下游节点"
+
+    @staticmethod
+    def input_schema():
+        return {
+            "model": {"types": ["std_1.0@model"], "required": True, "title": "模型"}
+        }
 
     def invoke(self, model):
         import joblib
@@ -71,25 +75,14 @@ class SaveModel(Component):
         return {"model": model}
 
 
-class LoadModel(Component):
+class LoadModel(_Persist):
     name = "LoadModel"
     title = "加载模型"
     desc = "读回文件里保存的模型；反序列化会执行文件里的代码，只加载可信来源的文件"
 
     @staticmethod
-    def config_schema():
-        return {"path": _path_schema()}
-
-    @staticmethod
     def input_schema():
         return {}
-
-    @staticmethod
-    def output_schema():
-        return {"model": {"type": "std_1.0@model", "title": "模型"}}
-
-    def __init__(self, config):
-        self.path = expand_env(config["path"])
 
     def invoke(self):
         import joblib

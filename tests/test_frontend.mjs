@@ -439,6 +439,10 @@ addCase('planImport 正常 JSON', async () => {
   )
   check(plan.missing.length === 0, `不应有缺失组件：${plan.missing}`)
   check(plan.skipped.length === 0, `不应有跳过项：${plan.skipped}`)
+  check(
+    plan.prunedGroups === 0 && plan.trimmedMembers === 0,
+    `正常文件不应裁分组：pruned=${plan.prunedGroups} trimmed=${plan.trimmedMembers}`,
+  )
 
   const [first, second] = plan.nodes
   check(first.type === 'comp', `节点 type 不对：${first.type}`)
@@ -465,6 +469,85 @@ addCase('planImport 正常 JSON', async () => {
       `节点 ${node.id} 应有有限坐标：${JSON.stringify(node.position)}`,
     )
   }
+})
+
+addCase('planImport 分组：部分成员失效只裁成员', async () => {
+  const { planImport } = await loadImport()
+  const plan = planImport(
+    {
+      name: 'trim',
+      nodes: [
+        { id: 'n1', plugin: 'fileio', component: 'LoadCSV', config: {}, inputs: {} },
+      ],
+      addition: {
+        client: 'workflow-studio',
+        version: 1,
+        groups: [{ id: 'g1', title: '局部失效', members: ['n1', 'n2'] }],
+      },
+    },
+    layoutOptions([loadCsvEntry()]),
+  )
+  check(plan.prunedGroups === 0, `部分失效不应丢组，实际 ${plan.prunedGroups}`)
+  check(plan.trimmedMembers === 1, `应裁掉 1 个不存在的成员，实际 ${plan.trimmedMembers}`)
+  check(plan.groups.length === 1, `应保留 g1：${JSON.stringify(plan.groups)}`)
+  check(plan.groups[0].id === 'g1', `保留的组 id 不对：${plan.groups[0].id}`)
+  assertDeepEqual(plan.groups[0].members, ['n1'], 'g1 只应剩存在的 n1')
+})
+
+addCase('planImport 分组：整组失效被丢弃且不计入 trimmedMembers', async () => {
+  const { planImport } = await loadImport()
+  const plan = planImport(
+    {
+      name: 'prune',
+      nodes: [
+        { id: 'n1', plugin: 'fileio', component: 'LoadCSV', config: {}, inputs: {} },
+      ],
+      addition: {
+        client: 'workflow-studio',
+        version: 1,
+        groups: [
+          { id: 'g1', title: '仍有效', members: ['n1', 'n2'] },
+          { id: 'g2', title: '整组失效', members: ['n9'] },
+        ],
+      },
+    },
+    layoutOptions([loadCsvEntry()]),
+  )
+  check(plan.prunedGroups === 1, `应丢 1 个整组，实际 ${plan.prunedGroups}`)
+  check(
+    plan.trimmedMembers === 1,
+    `整组丢掉的成员不应算进 trimmedMembers，实际 ${plan.trimmedMembers}`,
+  )
+  assertDeepEqual(plan.groups.map((group) => group.id), ['g1'], '只剩仍有效的 g1')
+})
+
+addCase('planImport droppedGroups 与 prunedGroups 互不吞并', async () => {
+  const { planImport } = await loadImport()
+  const plan = planImport(
+    {
+      name: 'both',
+      nodes: [
+        { id: 'n1', plugin: 'fileio', component: 'LoadCSV', config: {}, inputs: {} },
+      ],
+      addition: {
+        client: 'workflow-studio',
+        version: 1,
+        groups: [
+          { id: 'n1', title: '撞节点 id', members: ['n9'] },
+          { id: 'g1', title: '正常', members: ['n1'] },
+          { id: 'g2', title: '整组失效', members: ['n9'] },
+        ],
+      },
+    },
+    layoutOptions([loadCsvEntry()]),
+  )
+  check(plan.droppedGroups === 1, `撞节点 id 的组应计入 droppedGroups，实际 ${plan.droppedGroups}`)
+  check(plan.prunedGroups === 1, `只有 g2 应计入 prunedGroups，实际 ${plan.prunedGroups}`)
+  check(
+    plan.trimmedMembers === 0,
+    `被 droppedGroups 丢掉的组里的成员不应再算 trimmedMembers，实际 ${plan.trimmedMembers}`,
+  )
+  assertDeepEqual(plan.groups.map((group) => group.id), ['g1'], '只剩 g1')
 })
 
 addCase('planImport 缺组件时生成占位节点并进 missing', async () => {
@@ -1039,6 +1122,16 @@ addCase('projectGraph 展开组：frame 固定在原点且不可交互', () => {
   const frame = result.nodes.find((node) => node.id === 'g1')
   check(frame.type === 'frame', '展开组应出 frame')
   assertDeepEqual(frame.position, { x: 0, y: 0 }, 'frame 固定在 (0,0)')
+  // 两个字段缺一不可：显式 0×0 覆盖 Object.assign 复用节点残留的旧尺寸，并让 fitView 跳过
+  check(
+    frame.dimensions?.width === 0 && frame.dimensions?.height === 0,
+    `frame 必须显式 0×0：既让 fitView 跳过，又覆盖复用节点残留的旧尺寸：${JSON.stringify(frame.dimensions)}`,
+  )
+  // 0×0 会被 Vue Flow 写成 visibility:hidden，可见性靠 style 覆盖
+  check(
+    frame.style?.visibility === 'visible',
+    `frame 必须用 style.visibility 覆盖可见性，否则 0×0 的框会被隐藏：${JSON.stringify(frame.style)}`,
+  )
   check(frame.zIndex === -1, 'frame 应在底层')
   check(
     frame.selectable === false && frame.draggable === false && frame.connectable === false,
@@ -2021,7 +2114,14 @@ if (debugModel) {
           phase,
           current: 'n2',
           order: ['n1', 'n2'],
-          nodes: { n1: { status: 'fresh', duration_ms: 3.5, error: null, outputs: {} } },
+          nodes: {
+            n1: {
+              status: 'fresh',
+              duration_ms: 3.5,
+              error: null,
+              outputs: { table: 'DataFrame 60 行 × 2 列' },
+            },
+          },
         },
       )
       check(view.phase === phase, `phase 应为 ${phase}，实际 ${view.phase}`)
@@ -2031,9 +2131,19 @@ if (debugModel) {
         `nodes 应保留：${JSON.stringify(view.nodes)}`,
       )
       assertDeepEqual(
-        Object.keys(view.nodes.n1),
-        ['status'],
-        '节点只保留 status（duration_ms/error/outputs 已按 Occam 减项删除）',
+        Object.keys(view.nodes.n1).sort(),
+        ['duration_ms', 'error', 'outputs', 'status'],
+        '节点固定四件套 status / duration_ms / error / outputs',
+      )
+      check(
+        view.nodes.n1.duration_ms === 3.5,
+        `有限 duration_ms 应保留：${view.nodes.n1.duration_ms}`,
+      )
+      check(view.nodes.n1.error === null, `error 应为 null：${JSON.stringify(view.nodes.n1.error)}`)
+      assertDeepEqual(
+        view.nodes.n1.outputs,
+        { table: 'DataFrame 60 行 × 2 列' },
+        'outputs 应按端口保留预览',
       )
     }
   })
@@ -2055,20 +2165,86 @@ if (debugModel) {
     }
   })
 
-  addCase('debug.applyState 未知 status 不崩且节点只留 status', () => {
+  addCase('debug.applyState 坏形状归一：未知 status、坏 outputs、坏 duration/error', () => {
     const view = applyState(null, {
       phase: 'running',
       current: 'n1',
-      order: ['n1'],
+      order: ['n1', 'n2'],
       nodes: {
-        n1: { status: 'weird', duration_ms: 8, error: 'boom', outputs: { a: 1 } },
+        n1: {
+          status: 'weird',
+          duration_ms: 'abc',
+          error: 42,
+          outputs: ['not', 'an', 'object'],
+        },
+        n2: {
+          status: 'fresh',
+          duration_ms: 1,
+          error: '',
+          outputs: { table: 'ok', count: 3, flag: true },
+        },
       },
     })
-    check(view.nodes.n1 && typeof view.nodes.n1 === 'object', '未知 status 不应崩')
-    assertDeepEqual(Object.keys(view.nodes.n1), ['status'], '节点只留 status 一个键')
+    check(view.nodes.n1 && typeof view.nodes.n1 === 'object', '坏形状不应崩')
+    check(view.nodes.n1.status === 'unrun', `未知 status 应归 unrun：${view.nodes.n1.status}`)
+    check(view.nodes.n1.duration_ms === null, `duration_ms 非数字应归 null：${view.nodes.n1.duration_ms}`)
+    check(view.nodes.n1.error === null, `非字符串 error 应归 null：${JSON.stringify(view.nodes.n1.error)}`)
+    assertDeepEqual(view.nodes.n1.outputs, {}, 'outputs 是数组时应归一成空对象')
+    assertDeepEqual(
+      view.nodes.n2.outputs,
+      { table: 'ok' },
+      'outputs 里的非字符串值应逐条丢弃',
+    )
     check(
-      typeof view.nodes.n1.status === 'string' && view.nodes.n1.status !== '',
-      `未知 status 应归一成非空字符串：${view.nodes.n1.status}`,
+      view.nodes.n2.error === null,
+      `空串 error 应归 null：${JSON.stringify(view.nodes.n2.error)}`,
+    )
+  })
+
+  addCase('debug.applyState state 带 outputs 时逐端口保留', () => {
+    const tablePreview = "DataFrame 60 行 × 2 列 ['x','y'] ..."
+    const first = applyState(null, {
+      phase: 'paused',
+      current: 'n1',
+      nodes: {
+        n1: {
+          status: 'fresh',
+          duration_ms: 12,
+          error: null,
+          outputs: { table: tablePreview, model: '模型预览' },
+        },
+      },
+    })
+    check(first.nodes.n1.status === 'fresh', `冻结节点应是 fresh：${first.nodes.n1.status}`)
+    check(
+      first.nodes.n1.outputs.table === tablePreview,
+      `outputs.table 应原样保留：${JSON.stringify(first.nodes.n1.outputs)}`,
+    )
+    check(
+      first.nodes.n1.outputs.model === '模型预览',
+      `同帧的其它端口也应保留：${JSON.stringify(first.nodes.n1.outputs)}`,
+    )
+
+    const second = applyState(first, {
+      phase: 'ended',
+      current: null,
+      nodes: {
+        n1: {
+          status: 'fresh',
+          duration_ms: 20,
+          error: null,
+          outputs: { table: 'new preview' },
+        },
+      },
+    })
+    assertDeepEqual(
+      second.nodes.n1.outputs,
+      { table: 'new preview' },
+      '后续帧应整体覆盖端口预览而不是累加旧端口',
+    )
+    check(
+      second.nodes.n1.duration_ms === 20,
+      `后续帧的 duration_ms 也应更新：${second.nodes.n1.duration_ms}`,
     )
   })
 
@@ -2234,6 +2410,37 @@ if (debugClient) {
     assertDeepEqual(calls[1][1], log, 'onLog 应收到整条消息')
     assertDeepEqual(calls[2][1], ack, 'onAck 应收到整条消息')
     assertDeepEqual(calls[3][1], error, 'onError 应收到整条消息')
+  })
+
+  addCase('debug.client 派发 inspect 报文', async () => {
+    const calls = []
+    const handlers = {
+      onState: (payload) => calls.push(['state', payload]),
+      onInspect: (payload) => calls.push(['inspect', payload]),
+      onLog: (payload) => calls.push(['log', payload]),
+      onAck: (payload) => calls.push(['ack', payload]),
+      onError: (payload) => calls.push(['error', payload]),
+      onClose: (payload) => calls.push(['close', payload]),
+    }
+    FakeWebSocket.instances.length = 0
+    const client = new debugClient.DebugClient({ port: 8801, token: 'tok', handlers })
+    const socket = await connectDebugClient(client)
+
+    const data = {
+      node: 'n1',
+      inputs: { data: 'x' },
+      outputs: { table: 'y' },
+    }
+    socket.emit({ type: 'inspect', data })
+    check(
+      calls.length === 1,
+      `inspect 只应触发 onInspect，其它回调不能误触发：${JSON.stringify(calls)}`,
+    )
+    check(calls[0][0] === 'inspect', `应触发 onInspect，实际 ${calls[0][0]}`)
+    assertDeepEqual(calls[0][1], data, 'onInspect 应收到完整 message.data')
+
+    socket.emit({ type: 'nope', data: { node: 'n2' } })
+    check(calls.length === 1, `未知 type 仍应忽略：${JSON.stringify(calls)}`)
   })
 
   addCase('debug.client 未知 type / 非 JSON / 非字符串都忽略', async () => {

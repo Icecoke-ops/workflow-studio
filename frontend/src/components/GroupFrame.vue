@@ -1,7 +1,8 @@
 <script setup>
-import { computed, nextTick, ref } from 'vue'
+import { computed } from 'vue'
 import { useVueFlow } from '@vue-flow/core'
 import { frameItems, unionBox } from '../groups.js'
+import { useInlineTitle } from '../useInlineTitle.js'
 
 const props = defineProps({
   id: { type: String, default: '' },
@@ -11,42 +12,13 @@ const props = defineProps({
 
 const { findNode } = useVueFlow()
 
-// 标题就地改名：编辑态自持，提交才交给 App（data.onRename），取消直接丢弃草稿。
-const editing = ref(false)
-const draft = ref('')
-const composing = ref(false)
-const titleInput = ref(null)
+const {
+  editing, draft, titleInput,
+  beginRename, onCompositionStart, onCompositionEnd, commitTitle, cancelTitle,
+} = useInlineTitle(() => props.data)
 
-async function beginRename() {
-  draft.value = props.data.title || ''
-  editing.value = true
-  await nextTick()
-  titleInput.value?.focus()
-  titleInput.value?.select()
-}
-
-function onCompositionStart() {
-  composing.value = true
-}
-
-function onCompositionEnd() {
-  composing.value = false
-  // 浏览器可能先 blur 后 compositionend：组字结束后若输入框已失焦，补一次提交
-  if (editing.value && titleInput.value !== document.activeElement) commitTitle()
-}
-
-function commitTitle() {
-  if (composing.value || !editing.value) return
-  editing.value = false
-  const title = draft.value.trim()
-  if (!title || title === props.data.title) return
-  props.data.onRename?.(props.data.groupId, title)
-}
-
-function cancelTitle() {
-  if (composing.value) return
-  editing.value = false
-}
+// 框比成员包围盒外扩一圈：单成员组的虚线和淡紫底色也能露在卡片外
+const PAD = 8
 
 // findNode 里的节点是响应式的：成员被拖动时这里自动重算，不写 watcher、不回写位置
 const box = computed(() => {
@@ -61,7 +33,14 @@ const box = computed(() => {
       height: node.dimensions?.height || 200,
     })
   }
-  return unionBox(boxes)
+  const union = unionBox(boxes)
+  if (!union) return null
+  return {
+    x: union.x - PAD,
+    y: union.y - PAD,
+    width: union.width + PAD * 2,
+    height: union.height + PAD * 2,
+  }
 })
 </script>
 

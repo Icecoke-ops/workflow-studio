@@ -1,13 +1,19 @@
 <script setup>
 import { computed } from 'vue'
+import DebugPanel from './DebugPanel.vue'
 
 const props = defineProps({
   report: { type: Object, default: null },
   run: { type: Object, default: null },
+  debugActive: { type: Boolean, default: false },
+  debugView: { type: Object, required: true },
+  debugLogs: { type: Array, default: () => [] },
+  debugError: { type: String, default: '' },
+  inspect: { type: Function, required: true },
 })
 
 const activeTab = defineModel('activeTab', { type: String, default: 'validate' })
-const emit = defineEmits(['collapse'])
+const emit = defineEmits(['collapse', 'debug-continue', 'debug-stop'])
 
 const totalMs = computed(() => {
   const nodes = props.run?.nodes
@@ -20,9 +26,9 @@ const failedCount = computed(() => props.run?.failedIds?.length || 0)
 </script>
 
 <template>
-  <section class="result-panel">
+  <section class="bottom-dock">
     <button
-      class="panel-collapse result-collapse"
+      class="panel-collapse dock-collapse"
       type="button"
       title="收起底部"
       aria-label="收起底部"
@@ -30,7 +36,7 @@ const failedCount = computed(() => props.run?.failedIds?.length || 0)
     >
       ▼
     </button>
-    <el-tabs v-model="activeTab" class="result-tabs">
+    <el-tabs v-model="activeTab" class="dock-tabs">
       <el-tab-pane name="validate">
         <template #label>
           <span>校验结果</span>
@@ -122,21 +128,41 @@ const failedCount = computed(() => props.run?.failedIds?.length || 0)
           </template>
         </div>
       </el-tab-pane>
+
+      <el-tab-pane name="debug">
+        <template #label>
+          <span>调试运行</span>
+        </template>
+
+        <div v-if="debugActive" class="debug-pane">
+          <DebugPanel
+            :view="debugView"
+            :logs="debugLogs"
+            :error="debugError"
+            :inspect="inspect"
+            :active="activeTab === 'debug'"
+            @continue="emit('debug-continue')"
+            @stop="emit('debug-stop')"
+          />
+        </div>
+        <div v-else class="pane-body">
+          <div class="placeholder">点顶部「调试」启动调试会话。</div>
+        </div>
+      </el-tab-pane>
     </el-tabs>
   </section>
 </template>
 
 <style scoped>
-.result-panel {
+.bottom-dock {
   position: relative;
-  height: 232px;
   flex: none;
   background: var(--panel);
   border-top: 1px solid var(--border);
   min-height: 0;
 }
 
-.result-collapse {
+.dock-collapse {
   position: absolute;
   top: 6px;
   right: 10px;
@@ -144,29 +170,29 @@ const failedCount = computed(() => props.run?.failedIds?.length || 0)
   z-index: 2;
 }
 
-.result-tabs {
+.dock-tabs {
   height: 100%;
   display: flex;
   flex-direction: column;
 }
 
-.result-tabs :deep(.el-tabs__header) {
+.dock-tabs :deep(.el-tabs__header) {
   margin: 0;
   padding: 0 12px;
 }
 
-.result-tabs :deep(.el-tabs__item) {
+.dock-tabs :deep(.el-tabs__item) {
   height: 34px;
   line-height: 34px;
   font-size: 12px;
 }
 
-.result-tabs :deep(.el-tabs__content) {
+.dock-tabs :deep(.el-tabs__content) {
   flex: 1;
   min-height: 0;
 }
 
-.result-tabs :deep(.el-tab-pane) {
+.dock-tabs :deep(.el-tab-pane) {
   height: 100%;
 }
 
@@ -174,6 +200,10 @@ const failedCount = computed(() => props.run?.failedIds?.length || 0)
   height: 100%;
   overflow: auto;
   padding: 8px 14px 12px;
+}
+
+.debug-pane {
+  height: 100%;
 }
 
 .summary {
