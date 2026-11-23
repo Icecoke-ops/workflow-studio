@@ -259,13 +259,15 @@ self.path = expand_env(config["path"])   # "${workspace}/data/x.csv"
 
 | 方法 | 路径 | 响应 |
 |---|---|---|
-| GET | `/api/health` | `{"ok":true,"engine":"0.3.1","plugins":6,"components":27}` |
+| GET | `/api/health` | `{"ok":true,"engine":"0.6.1","plugins":6,"components":27}` |
 | GET | `/api/plugins` | `{"plugins":[{name,version,title,types:[{id,desc}],components:[{name,title,desc,config_schema,input_schema,output_schema}]}]}` |
 | POST | `/api/validate` | 请求 `{"workflow":{...}}` → `{"ok":bool,"errors":[],"warnings":[],"order":[]}` |
 | POST | `/api/run` | 请求同上 → `{"ok":bool,"errors":[],"warnings":[],"order":[],"nodes":[{id,component,ms,outputs:{端口:preview},"error":null}]}` |
 | POST | `/api/debug/start` | 请求同上 → `{"ok":true,"session":"<id>","port":8801,"token":"<随机串>"}` |
 | POST | `/api/debug/stop` | 请求 `{"session":"<id>"}` → `{"ok":true}` |
 | GET | `/`、`/static/*` | 回 `studio/web/` 下的静态文件 |
+
+`engine` 是引擎版本字符串（取自 `engine/__init__.py` 的 `__version__`），**示例里的数字随发版变化，不属于契约**；`plugins` / `components` 是当前加载的插件数与组件数。
 
 `input_schema` 每项额外带 `type_labels`（短名数组），`output_schema` 每项额外带 `type_label`，供界面显示。
 
@@ -306,7 +308,7 @@ base: '/static/'      // 构建时生效，dev 用 '/'
 |---|---|
 | 打包插件 | `python tools/build_plugins.py` |
 | 命令行引擎 | `python -m engine run <json>` / `validate` / `plugins` |
-| 指定插件目录 | `python -m engine run -p <dir> --plugins-dir <dir> <json>` |
+| 指定插件目录 | `python -m engine run -p <dir> <json>` |
 | 指定环境变量 | `python -m engine -e DATA_DIR=D:\data -e MODEL_DIR=D:\models run <json>` |
 | 挂执行钩子 | `python -m engine run --hook <钩子路径> -e hook_port=<端口> -e hook_token=<token> <json>`（`http_debug` 还要 `-e hook_port_file=<文件>`，`hook_port=0` 即系统分配） |
 | 起 Web 服务 | `python -m studio --port 8765` |
@@ -425,7 +427,7 @@ def run(workflow, registry, on_node_done=None) -> dict[str, NodeResult]
 
 ### 9.6 官方钩子：`hooks/http_debug/`
 
-WebSocket 服务，Studio 的调试器直连。引擎启动后**不自动跑任何节点**，一切等命令。
+WebSocket 服务，Studio 的调试器直连。引擎启动后**不自动跑任何节点**，一切等命令。该钩子依赖 `websockets`（已在仓库根 `requirements.txt` 里声明，锁在实测过的大版本）。
 
 - `hook_port`（可选）：给了就绑这个端口，`0` 或省略由系统分配。
 - `hook_token`（必填，缺则拒绝启动）。

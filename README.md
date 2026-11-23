@@ -47,10 +47,10 @@
 
 ## 快速开始
 
-需要 Python 3.12。示例插件依赖 `pandas`、`numpy`、`openpyxl`、`scikit-learn`、`joblib`：
+需要 Python 3.12。一次把依赖装齐——引擎本身零第三方依赖，不装也能用命令行；这里装的是 Studio 调试与官方示例插件需要的：
 
 ```bash
-pip install pandas numpy openpyxl scikit-learn joblib
+pip install -r requirements.txt
 ```
 
 **1. 打包插件**（源码在 `plugins/src/`，打包成 `plugins/*.zip`）
@@ -120,6 +120,8 @@ python -m studio --port 8765
 ```
 
 打开 <http://127.0.0.1:8765>。改完前端代码后重新执行 `python tools/build_web.py` 即可，刷新页面生效。
+
+调试面板直连 `hooks/http_debug` 钩子，它依赖 `websockets`（已列在 `requirements.txt` 里）。没装的话 Studio 照样能起，但一开调试就会报 `ModuleNotFoundError`。
 
 Studio 的其他参数：
 
