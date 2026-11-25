@@ -1,7 +1,8 @@
 <script setup>
-import { computed, markRaw, nextTick, onMounted, ref } from 'vue'
+import { computed, markRaw, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 
+import ActivityBar from './components/ActivityBar.vue'
 import ComponentNode from './components/ComponentNode.vue'
 import CollapsedRail from './components/CollapsedRail.vue'
 import ContextMenu from './components/ContextMenu.vue'
@@ -11,19 +12,25 @@ import GroupFrame from './components/GroupFrame.vue'
 import GroupNode from './components/GroupNode.vue'
 import Inspector from './components/Inspector.vue'
 import Palette from './components/Palette.vue'
+import ProjectPanel from './components/ProjectPanel.vue'
+import TextViewer from './components/TextViewer.vue'
 import BottomDock from './components/BottomDock.vue'
 import { readAddition } from './addition'
 import {
+  fetchFile,
   fetchHealth,
   fetchPlugins,
+  fetchProject,
   runWorkflow,
   startDebugSession,
   stopDebugSession,
   validateWorkflow,
+  writeFile,
 } from './api'
 import { collectCopy, planPaste } from './clipboard'
 import { DebugClient } from './debug/client.js'
 import { EMPTY_VIEW, appendLog, applyState, isBusy } from './debug/model.js'
+import { isFlowPath, normalizePath, titleFromPath } from './documents'
 import {
   canGroup,
   commonParent,
@@ -92,6 +99,15 @@ const workflowEnv = ref([])
 const additionState = ref(null)
 const envDrawerVisible = ref(false)
 
+// ---- 项目与文档（当前只允许一个文档，结构上按多标签留） ------------------
+const project = ref(null) // { root, name, launcher }
+const leftView = ref('explorer')
+const docs = ref([])
+const activeId = ref(null)
+const saving = ref(false)
+
+const activeDoc = computed(() => docs.value.find((doc) => doc.id === activeId.value) || null)
+
 const validateReport = ref(null)
 const runResult = ref(null)
 const validating = ref(false)
@@ -99,7 +115,6 @@ const running = ref(false)
 const activeTab = ref('validate')
 const serverOnline = ref(null)
 
-const fileInput = ref(null)
 const graphRef = ref(null)
 
 // ---- 三面板布局（开合 / 尺寸，localStorage 持久化） ---------------------
@@ -208,6 +223,10 @@ function autoPosition() {
 }
 
 function addNode({ plugin, component, position }) {
+  if (activeDoc.value?.kind !== 'flow') {
+    ElMessage.warning('先打开一个流程图文件')
+    return
+  }
   const entry = componentIndex.value.get(`${plugin}.${component}`)
   if (!entry) {
     ElMessage.error(`组件不存在：${plugin}.${component}`)
@@ -467,7 +486,7 @@ function pasteClipboard() {
   reproject()
 }
 
-// ---- 导入 / 导出 -------------------------------------------------------
+// ---- 工作流 JSON -------------------------------------------------------
 
 function buildWorkflow() {
   return modelBuildWorkflow({
@@ -479,6 +498,13 @@ function buildWorkflow() {
     groups: serializeGroups(pruneGroups(groups.value, nodes.value), groupPositions(nodes.value)),
   })
 }
+
+// 内容签名只包含会写进文件的字段（节点位置在 addition 里）；选中、调试状态不进签名。
+const contentSignature = computed(() => JSON.stringify(buildWorkflow()))
+const dirty = computed(() => {
+  const doc = activeDoc.value
+  return Boolean(doc && doc.kind === 'flow' && doc.savedSignature !== contentSignature.value)
+})
 
 function importEnv(raw) {
   if (raw.env === undefined) {
@@ -494,34 +520,8 @@ function importEnv(raw) {
   workflowEnv.value = rows
 }
 
-function exportJson() {
-  const problem = envError(workflowEnv.value)
-  if (problem) {
-    ElMessage.error(problem)
-    return
-  }
-  const workflow = buildWorkflow()
-  const text = JSON.stringify(workflow, null, 2)
-  const blob = new Blob([text], { type: 'application/json' })
-  const url = URL.createObjectURL(blob)
-  const link = document.createElement('a')
-  link.href = url
-  link.download = `${workflow.name.replace(/[\\/:*?"<>|]/g, '_')}.json`
-  link.click()
-  URL.revokeObjectURL(url)
-  ElMessage.success('已导出工作流 JSON')
-}
-
-async function applyWorkflow(raw) {
-  if (nodes.value.length) {
-    try {
-      await ElMessageBox.confirm('覆盖当前画布？', '导入工作流', { type: 'warning' })
-    } catch {
-      return false
-    }
-  }
-  // 调试子进程里跑的是导入前的快照，换图前先收掉
-  await stopDebug()
+/** 载入一份工作流 JSON 到画布；取景由 openDocument 在画布挂载后做。 */
+function applyWorkflow(raw) {
   const plan = planImport(raw, {
     componentFor: (plugin, component) => componentIndex.value.get(`${plugin}.${component}`),
     typeDescs: typeDescs.value,
@@ -563,44 +563,154 @@ async function applyWorkflow(raw) {
   if (plan.skipped.length) {
     ElMessage.warning(`导入时跳过 ${plan.skipped.length} 项：${plan.skipped.slice(0, 3).join('；')}`)
   }
-
-  await nextTick()
-  // 导入会复用同 id 的 Vue Flow 节点对象，旧的 selected 标记被 Object.assign 留下；
-  // 而 selection watch 的去重键没变、不会再通知 App，所以这里显式清一次选中态
-  // （不传参 = 取消全部节点与边的选中）。
-  graphRef.value?.clearSelection?.()
-  // 新节点要等 ResizeObserver 量出尺寸才能取景；ResizeObserver 在同一帧的 rAF 之后
-  // 才回调，所以等两帧再 fitView，否则节点全是 0×0、fitView 直接 no-op。
-  await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)))
-  graphRef.value?.fitView?.({ padding: 0.2 })
-  return true
 }
 
-async function onImportFile(event) {
-  const file = event.target.files?.[0]
-  event.target.value = ''
-  if (!file) return
+// ---- 项目与文档 --------------------------------------------------------
+
+function fileErrors(data) {
+  const errors = data && Array.isArray(data.errors) ? data.errors.filter(Boolean) : []
+  return errors.join('；') || '接口返回失败'
+}
+
+async function loadProject() {
   try {
-    const raw = JSON.parse(await file.text())
-    if (await applyWorkflow(raw)) {
-      ElMessage.success(`已导入 ${nodes.value.filter(isComponentNode).length} 个节点`)
-    }
+    const data = await fetchProject()
+    if (data.ok === false) throw new Error(fileErrors(data))
+    project.value = { root: data.root, name: data.name, launcher: data.launcher }
+    if (data.skipped?.length) ElMessage.warning(`有 ${data.skipped.length} 个插件未能加载`)
   } catch (err) {
-    ElMessage.error(`导入失败：${err.message}`)
+    project.value = null
+    ElMessage.error(`读取项目失败：${err.message}`)
   }
 }
 
-// ---- 工具栏动作 --------------------------------------------------------
+async function confirmDiscard() {
+  if (!dirty.value) return true
+  try {
+    await ElMessageBox.confirm('当前流程图有未保存的修改，继续会丢失这些修改。', '未保存的修改', {
+      type: 'warning',
+      confirmButtonText: '继续',
+      cancelButtonText: '取消',
+    })
+    return true
+  } catch {
+    return false
+  }
+}
 
-async function newWorkflow() {
-  if (nodes.value.length) {
-    try {
-      await ElMessageBox.confirm('清空当前画布？', '新建工作流', { type: 'warning' })
-    } catch {
+/** 为多标签预留：切走前把当前画布快照进 doc（当前只允许一个文档，旧 doc 随后会被替换）。 */
+function snapshotActiveDoc() {
+  const doc = activeDoc.value
+  if (!doc || doc.kind !== 'flow') return
+  doc.workflow = buildWorkflow()
+}
+
+async function openDocument(rawPath) {
+  const path = normalizePath(rawPath)
+  if (!path || activeDoc.value?.path === path) return
+  if (!(await confirmDiscard())) return
+  snapshotActiveDoc()
+  await stopDebug()
+
+  let file
+  try {
+    file = await fetchFile(path)
+    if (file.ok === false) throw new Error(fileErrors(file))
+  } catch (err) {
+    ElMessage.error(`打开失败：${err.message}`)
+    return
+  }
+
+  if (isFlowPath(path)) {
+    if (file.kind !== 'text') {
+      ElMessage.error(file.kind === 'too_large' ? '文件太大，无法打开。' : '不是文本文件。')
       return
     }
+    try {
+      applyWorkflow(JSON.parse(file.text))
+    } catch (err) {
+      ElMessage.error(`打开失败：${err.message}`)
+      return
+    }
+    const doc = { id: path, path, title: titleFromPath(path), kind: 'flow', savedSignature: '' }
+    docs.value = [doc]
+    activeId.value = path
+    await nextTick()
+    // 复用同 id 的 Vue Flow 节点对象时旧的 selected 会残留，显式清一次
+    graphRef.value?.clearSelection?.()
+    // 新节点要等 ResizeObserver 量出尺寸；等两帧再 fitView，否则 0×0 会 no-op
+    await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)))
+    graphRef.value?.fitView?.({ padding: 0.2 })
+    doc.savedSignature = contentSignature.value
+    return
   }
-  await stopDebug()
+
+  docs.value = [{
+    id: path,
+    path,
+    title: titleFromPath(path),
+    kind: 'text',
+    text: file.text,
+    fileKind: file.kind,
+    size: file.size,
+  }]
+  activeId.value = path
+}
+
+async function saveDocument() {
+  const doc = activeDoc.value
+  if (!doc || doc.kind !== 'flow' || saving.value) return
+  const problem = envError(workflowEnv.value)
+  if (problem) {
+    ElMessage.error(problem)
+    return
+  }
+  saving.value = true
+  try {
+    const text = `${JSON.stringify(buildWorkflow(), null, 2)}\n`
+    const data = await writeFile(doc.path, text)
+    if (data.ok === false) throw new Error(fileErrors(data))
+    doc.savedSignature = contentSignature.value
+    ElMessage.success(`已保存 ${doc.title}`)
+  } catch (err) {
+    ElMessage.error(`保存失败：${err.message}`)
+  } finally {
+    saving.value = false
+  }
+}
+
+async function closeProject() {
+  if (!project.value) return
+  if (!(await confirmDiscard())) return
+  const launcher = project.value.launcher
+  if (!launcher) {
+    ElMessage.warning('当前项目没有 launcher 地址，无法关闭。')
+    return
+  }
+  const sep = launcher.includes('?') ? '&' : '?'
+  window.location.href = `${launcher}${sep}close=${encodeURIComponent(project.value.root)}`
+}
+
+function openLauncher() {
+  if (project.value?.launcher) window.open(project.value.launcher, '_blank')
+}
+
+function onPathRenamed({ from, to }) {
+  const doc = activeDoc.value
+  if (!doc) return
+  const oldPath = normalizePath(from)
+  const newPath = normalizePath(to)
+  let next = ''
+  if (doc.path === oldPath) next = newPath
+  else if (doc.path.startsWith(`${oldPath}/`)) next = `${newPath}${doc.path.slice(oldPath.length)}`
+  if (!next) return
+  doc.path = next
+  doc.id = next
+  doc.title = titleFromPath(next)
+  activeId.value = next
+}
+
+function resetCanvas() {
   nodes.value = []
   edges.value = []
   canvasEdges.value = []
@@ -613,6 +723,30 @@ async function newWorkflow() {
   runResult.value = null
   activeTab.value = 'validate'
 }
+
+function onPathDeleted(path) {
+  const doc = activeDoc.value
+  if (!doc || doc.path !== normalizePath(path)) return
+  void stopDebug()
+  resetCanvas()
+  docs.value = []
+  activeId.value = null
+}
+
+function onBeforeUnload(event) {
+  if (!dirty.value) return
+  event.preventDefault()
+  event.returnValue = ''
+}
+
+function onWindowKeydown(event) {
+  if ((event.ctrlKey || event.metaKey) && !event.altKey && event.key.toLowerCase() === 's') {
+    event.preventDefault()
+    void saveDocument()
+  }
+}
+
+// ---- 工具栏动作 --------------------------------------------------------
 
 async function doValidate() {
   validating.value = true
@@ -833,8 +967,14 @@ async function loadPlugins() {
 }
 
 onMounted(async () => {
-  await loadPlugins()
-  await checkHealth()
+  window.addEventListener('beforeunload', onBeforeUnload)
+  window.addEventListener('keydown', onWindowKeydown)
+  await Promise.all([loadProject(), loadPlugins(), checkHealth()])
+})
+
+onBeforeUnmount(() => {
+  window.removeEventListener('beforeunload', onBeforeUnload)
+  window.removeEventListener('keydown', onWindowKeydown)
 })
 </script>
 
@@ -843,22 +983,28 @@ onMounted(async () => {
     <header class="topbar">
       <div class="brand">工作流编辑器</div>
 
-      <el-input
-        v-model="workflowName"
-        size="small"
-        class="name-input"
-        placeholder="工作流名称"
-      />
+      <div v-if="project" class="project-chip" :title="project.root">{{ project.name }}</div>
 
-      <el-button size="small" @click="newWorkflow">新建</el-button>
-      <el-button size="small" @click="fileInput.click()">导入 JSON</el-button>
-      <el-button size="small" @click="exportJson">导出 JSON</el-button>
+      <div class="doc-title" :title="activeDoc ? activeDoc.path : ''">
+        <span v-if="dirty" class="dirty-dot" title="有未保存的修改">●</span>
+        {{ activeDoc ? activeDoc.title : '未打开文件' }}
+      </div>
+
+      <el-button
+        size="small"
+        :loading="saving"
+        :disabled="!activeDoc || activeDoc.kind !== 'flow' || !dirty"
+        @click="saveDocument"
+      >
+        保存
+      </el-button>
+
       <el-button
         size="small"
         type="primary"
         plain
         :loading="validating"
-        :disabled="running"
+        :disabled="running || !activeDoc || activeDoc.kind !== 'flow'"
         @click="doValidate"
       >
         校验
@@ -867,7 +1013,7 @@ onMounted(async () => {
         size="small"
         type="primary"
         :loading="running"
-        :disabled="validating"
+        :disabled="validating || !activeDoc || activeDoc.kind !== 'flow'"
         @click="doRun"
       >
         运行
@@ -878,13 +1024,18 @@ onMounted(async () => {
         :type="debugActive ? 'danger' : 'primary'"
         plain
         :loading="debugStarting"
-        :disabled="running || validating"
+        :disabled="running || validating || !activeDoc || activeDoc.kind !== 'flow'"
         @click="toggleDebug"
       >
         {{ debugActive ? '结束调试' : '调试' }}
       </el-button>
 
       <div class="spacer"></div>
+
+      <el-button size="small" :disabled="!project || !project.launcher" @click="openLauncher">
+        项目列表
+      </el-button>
+      <el-button size="small" :disabled="!project" @click="closeProject">关闭项目</el-button>
 
       <el-tag
         size="small"
@@ -895,32 +1046,43 @@ onMounted(async () => {
       >
         {{ serverOnline === null ? '检测后端…' : serverOnline ? '后端在线' : '后端未连接' }}
       </el-tag>
-
-      <input ref="fileInput" type="file" accept=".json,application/json" hidden @change="onImportFile" />
     </header>
 
     <main class="main">
-      <Palette
-        v-if="layout.leftOpen"
-        :plugins="plugins"
-        :style="{ width: layout.leftWidth + 'px' }"
-        @add="addNode"
-        @collapse="togglePanel('left')"
-      />
+      <ActivityBar v-model:active="leftView" />
+
+      <template v-if="layout.leftOpen">
+        <Palette
+          v-if="leftView === 'components'"
+          :plugins="plugins"
+          :style="{ width: layout.leftWidth + 'px' }"
+          @add="addNode"
+          @collapse="togglePanel('left')"
+        />
+        <ProjectPanel
+          v-else
+          :project="project"
+          :style="{ width: layout.leftWidth + 'px' }"
+          @open="openDocument"
+          @collapse="togglePanel('left')"
+          @renamed="onPathRenamed"
+          @deleted="onPathDeleted"
+        />
+        <div
+          class="resize-handle resize-vertical"
+          title="拖拽调整左栏宽度"
+          @pointerdown="startResize('left', $event)"
+        />
+      </template>
       <CollapsedRail
         v-else
         side="left"
-        label="组件库"
+        :label="leftView === 'components' ? '组件库' : '资源管理器'"
         @expand="togglePanel('left')"
-      />
-      <div
-        v-if="layout.leftOpen"
-        class="resize-handle resize-vertical"
-        title="拖拽调整左栏宽度"
-        @pointerdown="startResize('left', $event)"
       />
 
       <GraphCanvas
+        v-if="activeDoc && activeDoc.kind === 'flow'"
         ref="graphRef"
         v-model:nodes="nodes"
         :edges="canvasEdges"
@@ -934,6 +1096,11 @@ onMounted(async () => {
         @paste="pasteClipboard"
         @context-menu="onCanvasContextMenu"
       />
+      <TextViewer v-else-if="activeDoc" :doc="activeDoc" class="canvas" />
+      <div v-else class="canvas empty-doc">
+        <p>从左侧资源管理器打开一个 <code>.flow</code> 文件</p>
+        <p class="muted small">右键目录可以新建流程图。</p>
+      </div>
 
       <div
         v-if="layout.rightOpen"
@@ -1026,9 +1193,57 @@ onMounted(async () => {
   white-space: nowrap;
 }
 
-.name-input {
-  width: 190px;
-  margin-right: 4px;
+.project-chip {
+  flex: none;
+  max-width: 160px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding: 2px 8px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text-2);
+  font-size: 12px;
+}
+
+.doc-title {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  max-width: 260px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+}
+
+.dirty-dot {
+  flex: none;
+  color: var(--warning);
+  font-size: 12px;
+}
+
+.empty-doc {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  color: var(--text-2);
+  background: var(--bg);
+}
+
+.empty-doc p {
+  margin: 0;
+}
+
+.empty-doc code {
+  padding: 0 3px;
+  border-radius: 3px;
+  background: #eef1f6;
+  font-family: Consolas, 'Courier New', monospace;
+  font-size: 12px;
 }
 
 .spacer {

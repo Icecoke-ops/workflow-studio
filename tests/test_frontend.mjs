@@ -31,7 +31,26 @@ import {
   serializeGroups,
 } from '../frontend/src/groups.js'
 import { collectCopy, planPaste } from '../frontend/src/clipboard.js'
-import { fetchHealth, fetchPlugins, runWorkflow } from '../frontend/src/api.js'
+import {
+  normalizePath,
+  joinPath,
+  parentPath,
+  titleFromPath,
+  isFlowPath,
+  newFlowText,
+} from '../frontend/src/documents.js'
+import {
+  fetchHealth,
+  fetchPlugins,
+  runWorkflow,
+  fetchProject,
+  fetchTree,
+  fetchFile,
+  writeFile,
+  makeDir,
+  renamePath,
+  deletePath,
+} from '../frontend/src/api.js'
 
 let failed = 0
 
@@ -1932,6 +1951,90 @@ addCase('畸形环 frameItems / memberLeaves 有界返回', () => {
   check(Array.isArray(leaves), `memberLeaves 应返回数组：${JSON.stringify(leaves)}`)
 })
 
+// ---- documents.js（项目内相对路径 + 新建流程图文本） ----
+
+addCase('documents normalizePath 统一分隔符并折叠重复 /', () => {
+  check(
+    normalizePath('docs\\sub//a.flow') === 'docs/sub/a.flow',
+    `反斜杠与重复 / 应归一：${normalizePath('docs\\sub//a.flow')}`,
+  )
+  check(
+    normalizePath('  /docs//sub/  ') === 'docs/sub',
+    `首尾空白与分隔符应去掉：${normalizePath('  /docs//sub/  ')}`,
+  )
+})
+
+addCase('documents normalizePath 空值与空串返回空串', () => {
+  for (const value of ['', null, undefined]) {
+    check(normalizePath(value) === '', `normalizePath(${String(value)}) 应为空串：${normalizePath(value)}`)
+  }
+})
+
+addCase('documents normalizePath 不消解 ./ 与 ..（越界由后端拒绝）', () => {
+  // 盘上实现只做分隔符归一，./ 与 .. 原样保留；这不是越界放行：
+  // studio/project.py 的 _rel_parts 会丢掉 "." 段、拒绝 ".." 段。
+  check(
+    normalizePath('./docs/a.flow') === './docs/a.flow',
+    `当前实现不删 ./：${normalizePath('./docs/a.flow')}`,
+  )
+  check(normalizePath('./') === '.', `当前实现把 ./ 归一成 .：${normalizePath('./')}`)
+  check(normalizePath('../evil') === '../evil', `.. 原样保留：${normalizePath('../evil')}`)
+  check(
+    normalizePath('docs\\..\\a.flow') === 'docs/../a.flow',
+    `中间的 .. 原样保留：${normalizePath('docs\\..\\a.flow')}`,
+  )
+})
+
+addCase('documents joinPath 目录与名字拼接', () => {
+  check(joinPath('', 'a.flow') === 'a.flow', `空目录应直接给名字：${joinPath('', 'a.flow')}`)
+  check(joinPath('docs', 'a.flow') === 'docs/a.flow', `实际：${joinPath('docs', 'a.flow')}`)
+  check(joinPath('docs/', 'a.flow') === 'docs/a.flow', `带尾 / 的目录：${joinPath('docs/', 'a.flow')}`)
+  check(joinPath('docs', 'sub/a.flow') === 'docs/sub/a.flow', `实际：${joinPath('docs', 'sub/a.flow')}`)
+  check(joinPath('docs', '/a.flow') === 'docs/a.flow', `子名开头的 / 应去掉：${joinPath('docs', '/a.flow')}`)
+  check(joinPath('docs\\', 'a.flow') === 'docs/a.flow', `base 的反斜杠应归一：${joinPath('docs\\', 'a.flow')}`)
+})
+
+addCase('documents parentPath 根/单层/多层/空串', () => {
+  check(parentPath('a.flow') === '', `根层文件应回空串：${parentPath('a.flow')}`)
+  check(parentPath('docs/a.flow') === 'docs', `单层：${parentPath('docs/a.flow')}`)
+  check(parentPath('docs/sub/a.flow') === 'docs/sub', `多层：${parentPath('docs/sub/a.flow')}`)
+  check(parentPath('') === '', `空串：${parentPath('')}`)
+  check(parentPath('docs\\sub\\a.flow') === 'docs/sub', `反斜杠应先归一：${parentPath('docs\\sub\\a.flow')}`)
+})
+
+addCase('documents titleFromPath 兼容 / 与 \\', () => {
+  check(titleFromPath('a.flow') === 'a.flow', `根层：${titleFromPath('a.flow')}`)
+  check(titleFromPath('docs/a.flow') === 'a.flow', `正斜杠：${titleFromPath('docs/a.flow')}`)
+  check(titleFromPath('docs\\a.flow') === 'a.flow', `反斜杠：${titleFromPath('docs\\a.flow')}`)
+  check(titleFromPath('docs/a.flow/') === 'a.flow', `末尾分隔符应忽略：${titleFromPath('docs/a.flow/')}`)
+})
+
+addCase('documents isFlowPath 大小写不敏感、只认结尾 .flow', () => {
+  check(isFlowPath('a.flow') === true, '.flow 应识别')
+  check(isFlowPath('docs/A.FLOW') === true, '大写 .FLOW 应识别')
+  check(isFlowPath('a.json') === false, '.json 不应识别')
+  check(isFlowPath('aflow') === false, '无后缀不应识别')
+  check(isFlowPath('a.flow.bak') === false, '只有以 .flow 结尾才算')
+})
+
+addCase('documents newFlowText 合法 JSON、nodes 为空、name 原样', () => {
+  const parsed = JSON.parse(newFlowText('demo'))
+  assertDeepEqual(parsed, { name: 'demo', nodes: [] }, 'newFlowText 解析结果')
+  check(parsed.nodes.length === 0, `nodes 应是空数组：${JSON.stringify(parsed.nodes)}`)
+  assertDeepEqual(
+    JSON.parse(newFlowText('  spaced  ')),
+    { name: '  spaced  ', nodes: [] },
+    'name 应原样保留（不 trim）',
+  )
+  check(newFlowText('').includes('未命名工作流'), '缺省名字应是「未命名工作流」')
+})
+
+addCase('documents newFlowText 使用 2 空格缩进', () => {
+  const text = newFlowText('x')
+  check(text.includes('\n  "name": "x"'), `应是 2 空格缩进：${JSON.stringify(text)}`)
+  check(!text.includes('\n    "name"'), '不能是 4 空格缩进')
+})
+
 function jsonResponse(status, payload) {
   return { ok: status < 400, status, text: async () => JSON.stringify(payload) }
 }
@@ -1944,6 +2047,16 @@ async function withFetchStub(stub, fn) {
   } finally {
     globalThis.fetch = original
   }
+}
+
+/** 记录每次 fetch 的 (url, options)，再回固定响应。 */
+function recordingFetch(status, payload) {
+  const calls = []
+  const stub = async (url, options = {}) => {
+    calls.push({ url, options })
+    return jsonResponse(status, payload)
+  }
+  return { calls, stub }
 }
 
 addCase('api.js 500 错误响应都 reject 且带后端消息', async () => {
@@ -1999,6 +2112,93 @@ addCase('api.js 200 合法响应正常 resolve', async () => {
     run.nodes[0].failed === false && run.nodes[0].outputs[0].port === 'table',
     `runWorkflow 应转换 nodes：${JSON.stringify(run.nodes)}`,
   )
+})
+
+// ---- api.js 批 4：项目/文件接口封装（断言 URL / Method / Body） ----
+
+addCase('api.js fetchProject 走 GET /api/project', async () => {
+  const { calls, stub } = recordingFetch(200, { ok: true, root: 'C:\\p', name: 'p' })
+  const data = await withFetchStub(stub, () => fetchProject())
+  check(calls.length === 1, `应只请求一次：${calls.length}`)
+  check(calls[0].url === '/api/project', `URL 不对：${calls[0].url}`)
+  check(calls[0].options.method === undefined, `应是 GET（不带 method）：${calls[0].options.method}`)
+  check(calls[0].options.body === undefined, 'GET 不应带 body')
+  check(data.root === 'C:\\p', `响应应原样返回：${JSON.stringify(data)}`)
+})
+
+addCase('api.js fetchTree 对 path 做 encodeURIComponent', async () => {
+  const { calls, stub } = recordingFetch(200, { ok: true, path: '', entries: [] })
+  await withFetchStub(stub, () => fetchTree(''))
+  await withFetchStub(stub, () => fetchTree('docs/sub dir/中文.flow'))
+  await withFetchStub(stub, () => fetchTree())
+  check(calls[0].url === '/api/tree?path=', `空 path 应显式带 path=：${calls[0].url}`)
+  check(
+    calls[1].url === '/api/tree?path=docs%2Fsub%20dir%2F%E4%B8%AD%E6%96%87.flow',
+    `空格/中文/斜杠都必须编码：${calls[1].url}`,
+  )
+  check(calls[2].url === '/api/tree?path=', `默认参数就是空 path：${calls[2].url}`)
+  check(
+    calls.every((call) => call.options.method === undefined),
+    'fetchTree 应是 GET',
+  )
+})
+
+addCase('api.js fetchFile 对 path 做 encodeURIComponent', async () => {
+  const { calls, stub } = recordingFetch(200, { ok: true, kind: 'text', text: '' })
+  await withFetchStub(stub, () => fetchFile('docs/a b.flow'))
+  check(calls[0].url === '/api/file?path=docs%2Fa%20b.flow', `URL 不对：${calls[0].url}`)
+  check(calls[0].options.method === undefined, 'fetchFile 应是 GET')
+})
+
+addCase('api.js writeFile POST JSON {path,text}', async () => {
+  const { calls, stub } = recordingFetch(200, { ok: true, path: 'docs/a.flow', size: 7 })
+  const text = 'héllo\n世界'
+  await withFetchStub(stub, () => writeFile('docs/a.flow', text))
+  check(calls[0].url === '/api/file', `URL 不对：${calls[0].url}`)
+  check(calls[0].options.method === 'POST', `method 不对：${calls[0].options.method}`)
+  check(
+    calls[0].options.headers['Content-Type'] === 'application/json',
+    `应带 JSON Content-Type：${JSON.stringify(calls[0].options.headers)}`,
+  )
+  assertDeepEqual(JSON.parse(calls[0].options.body), { path: 'docs/a.flow', text }, 'writeFile body')
+})
+
+addCase('api.js makeDir/renamePath/deletePath 字段与后端契约一致', async () => {
+  const { calls, stub } = recordingFetch(200, { ok: true, path: 'docs', errors: [] })
+  await withFetchStub(stub, () => makeDir('docs/new dir'))
+  await withFetchStub(stub, () => renamePath('docs/a.flow', 'b.flow'))
+  await withFetchStub(stub, () => deletePath('docs/a.flow'))
+  check(calls[0].url === '/api/mkdir', `mkdir URL 不对：${calls[0].url}`)
+  check(calls[0].options.method === 'POST', 'mkdir 应是 POST')
+  assertDeepEqual(JSON.parse(calls[0].options.body), { path: 'docs/new dir' }, 'makeDir body')
+  check(calls[1].url === '/api/rename', `rename URL 不对：${calls[1].url}`)
+  check(calls[1].options.method === 'POST', 'rename 应是 POST')
+  assertDeepEqual(
+    JSON.parse(calls[1].options.body),
+    { path: 'docs/a.flow', new_name: 'b.flow' },
+    'rename body 必须用 new_name',
+  )
+  check(calls[2].url === '/api/delete', `delete URL 不对：${calls[2].url}`)
+  check(calls[2].options.method === 'POST', 'delete 应是 POST')
+  assertDeepEqual(JSON.parse(calls[2].options.body), { path: 'docs/a.flow' }, 'delete body')
+})
+
+addCase('api.js 项目接口 500 时 reject 且消息来自后端', async () => {
+  const errors = ["路径不能包含 ..：'../x'", '项目未运行']
+  const stub = async () => jsonResponse(500, { ok: false, errors })
+  let message = ''
+  try {
+    await withFetchStub(stub, () => fetchTree('../x'))
+  } catch (err) {
+    message = err.message
+  }
+  check(message === errors.join('；'), `reject 消息应是后端 errors 用「；」连接：${message}`)
+})
+
+addCase('api.js 200 的 ok:false 原样 resolve 给调用方', async () => {
+  const payload = { ok: false, errors: ['目录不存在或不是目录：docs'] }
+  const data = await withFetchStub(async () => jsonResponse(200, payload), () => fetchTree('docs'))
+  assertDeepEqual(data, payload, 'ok:false 的 200 响应应原样 resolve')
 })
 
 // ---------------------------------------------------------------------------

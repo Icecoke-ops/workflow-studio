@@ -118,3 +118,47 @@ export async function stopDebugSession(session) {
     body: JSON.stringify({ session }),
   })
 }
+
+/** 当前项目：{ok, root, name, launcher, plugins, skipped}。 */
+export async function fetchProject() {
+  return request('/project')
+}
+
+/** 列项目内一层目录；path 是项目内相对路径，'' 表示项目根。 */
+export async function fetchTree(path = '') {
+  return request(`/tree?path=${encodeURIComponent(path)}`)
+}
+
+/** 读项目内文本文件：{ok, path, kind, text, size}。 */
+export async function fetchFile(path) {
+  return request(`/file?path=${encodeURIComponent(path)}`)
+}
+
+/** 新建或覆盖文本文件。 */
+export async function writeFile(path, text) {
+  return request('/file', {
+    method: 'POST',
+    body: JSON.stringify({ path, text }),
+  })
+}
+
+export async function makeDir(path) {
+  return request('/mkdir', {
+    method: 'POST',
+    body: JSON.stringify({ path }),
+  })
+}
+
+export async function renamePath(path, newName) {
+  return request('/rename', {
+    method: 'POST',
+    body: JSON.stringify({ path, new_name: newName }),
+  })
+}
+
+export async function deletePath(path) {
+  return request('/delete', {
+    method: 'POST',
+    body: JSON.stringify({ path }),
+  })
+}
