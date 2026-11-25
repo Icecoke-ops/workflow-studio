@@ -1515,22 +1515,8 @@ def main():
         check(wrap.returncode == 0, f"进程正常退出（exit {wrap.returncode}）")
         check(not port_file.exists(), "正常退出后端口文件已删除")
 
-        # 36) 不带 --serve：exit 1，并提示用 --serve
-        no_serve_err = temp / "no_serve.err"
-        with no_serve_err.open("wb") as err_file:
-            no_serve = subprocess.run(
-                [sys.executable, "-m", "studio", "--port", "0"],
-                cwd=str(ROOT),
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
-                stderr=err_file,
-                env=dict(os.environ, PYTHONIOENCODING="utf-8"),
-                timeout=15,
-            )
-        err_text = no_serve_err.read_text(encoding="utf-8", errors="replace")
-        check(no_serve.returncode == 1, f"不带 --serve 退出码 1（实际 {no_serve.returncode}）")
-        check("--serve" in err_text, f"stderr 提示用 --serve：{err_text.strip()}")
-
+        # 36) 批 3 起不带 --serve 的 `python -m studio` 是 launcher 默认入口，
+        # 不再是「退出 1 并提示用 --serve」；该入口由 tests/test_launcher.py 覆盖。
         print("\nALL OK")
         return 0
     finally:

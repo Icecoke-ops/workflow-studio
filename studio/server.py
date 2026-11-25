@@ -32,7 +32,9 @@ import mimetypes
 import os
 import sys
 import threading
+import time
 import traceback
+import urllib.request
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -561,6 +563,25 @@ class StudioHandler(BaseHTTPRequestHandler):
 
 # ---- 启动 ----
 
+WATCH_INTERVAL = 5.0
+WATCH_FAILURES = 3
+WATCH_TIMEOUT = 2.0
+
+
+def _watch_launcher(server, launcher_url):
+    """launcher 连续 3 次不可达就让 serve_forever 返回：父进程被强杀时不留孤儿。"""
+    url = launcher_url.rstrip("/") + "/api/health"
+    failures = 0
+    while failures < WATCH_FAILURES:
+        time.sleep(WATCH_INTERVAL)
+        try:
+            with urllib.request.urlopen(url, timeout=WATCH_TIMEOUT) as response:
+                response.read()
+            failures = 0
+        except OSError:
+            failures += 1
+    server.shutdown()
+
 def _query_path(url, default):
     values = parse_qs(url.query, keep_blank_values=True).get("path")
     return default if values is None else values[0]
@@ -681,6 +702,10 @@ def main(argv=None):
         f"[studio] 项目 {project.root} → http://127.0.0.1:{port}/ （Ctrl+C 停止）",
         flush=True,
     )
+    if args.launcher:
+        threading.Thread(
+            target=_watch_launcher, args=(server, args.launcher), daemon=True
+        ).start()
     try:
         server.serve_forever()
     except KeyboardInterrupt:

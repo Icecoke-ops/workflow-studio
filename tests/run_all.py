@@ -29,6 +29,7 @@ ORDER = [
     "test_standalone.py",
     "test_frontend.py",
     "test_studio_api.py",
+    "test_launcher.py",
 ]
 
 

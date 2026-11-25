@@ -1,0 +1,769 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Workflow Studio · 项目启动器</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #f5f6f8;
+    --card: #ffffff;
+    --border: #e4e7ed;
+    --text: #303133;
+    --text-2: #606266;
+    --muted: #909399;
+    --primary: #409eff;
+    --primary-hover: #337ecc;
+    --danger: #f56c6c;
+    --success: #67c23a;
+    --shadow: 0 1px 3px rgba(0, 0, 0, 0.06);
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #17181b;
+      --card: #222327;
+      --border: #34363c;
+      --text: #e5e6eb;
+      --text-2: #b6b9c0;
+      --muted: #8b8f98;
+      --primary: #66b1ff;
+      --primary-hover: #8cc5ff;
+      --danger: #f78989;
+      --success: #85ce61;
+      --shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
+    }
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    margin: 0;
+    padding: 28px 20px 40px;
+    background: var(--bg);
+    color: var(--text);
+    font: 14px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", "PingFang SC", sans-serif;
+  }
+
+  .page { max-width: 880px; margin: 0 auto; }
+
+  header { display: flex; align-items: flex-start; gap: 12px; }
+  header .titles { flex: 1; min-width: 0; }
+  h1 { margin: 0; font-size: 22px; font-weight: 600; letter-spacing: 0.2px; }
+  .sub { margin: 4px 0 0; color: var(--muted); font-size: 13px; }
+
+  .health {
+    flex: none;
+    margin-top: 4px;
+    padding: 2px 9px;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    color: var(--muted);
+    font-size: 12px;
+    white-space: nowrap;
+  }
+  .health.ok { color: var(--success); border-color: currentColor; }
+  .health.bad { color: var(--danger); border-color: currentColor; }
+
+  section {
+    margin-top: 16px;
+    padding: 16px 18px;
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    box-shadow: var(--shadow);
+  }
+
+  .section-head { display: flex; align-items: baseline; gap: 10px; }
+  h2 { margin: 0; font-size: 15px; font-weight: 600; }
+  .section-note { color: var(--muted); font-size: 12px; }
+
+  .message {
+    margin-top: 14px;
+    padding: 8px 12px;
+    border-radius: 6px;
+    font-size: 13px;
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+  .message.error { background: rgba(245, 108, 108, 0.12); color: var(--danger); }
+  .message.success { background: rgba(103, 194, 58, 0.12); color: var(--success); }
+  .message[hidden] { display: none; }
+
+  .project {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    padding: 10px 0;
+    border-top: 1px solid var(--border);
+  }
+  .project:first-child { border-top: none; }
+  .project-info { flex: 1; min-width: 0; }
+  .project-name { font-weight: 600; font-size: 14px; }
+  .project-meta {
+    display: flex;
+    gap: 8px;
+    min-width: 0;
+    margin-top: 2px;
+    color: var(--muted);
+    font-size: 12px;
+  }
+  .project-root {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-family: Consolas, "Courier New", monospace;
+  }
+  .project-port { flex: none; font-family: Consolas, "Courier New", monospace; }
+  .project-actions { flex: none; display: flex; gap: 6px; }
+
+  .empty {
+    padding: 14px 0 4px;
+    color: var(--muted);
+    font-size: 13px;
+  }
+  .empty.error { color: var(--danger); }
+
+  button {
+    font: inherit;
+    font-size: 13px;
+    line-height: 1;
+    padding: 7px 13px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--card);
+    color: var(--text-2);
+    cursor: pointer;
+    transition: color 0.12s, border-color 0.12s, background 0.12s;
+  }
+  button:hover:not(:disabled) { color: var(--primary); border-color: var(--primary); }
+  button:disabled { opacity: 0.5; cursor: default; }
+  button:focus-visible { outline: 2px solid var(--primary); outline-offset: 1px; }
+  button.primary {
+    border-color: var(--primary);
+    background: var(--primary);
+    color: #fff;
+  }
+  button.primary:hover:not(:disabled) { background: var(--primary-hover); color: #fff; }
+  button.danger:hover:not(:disabled) { color: var(--danger); border-color: var(--danger); }
+
+  .open-row { display: flex; gap: 8px; margin-top: 12px; }
+  .open-row input {
+    flex: 1;
+    min-width: 0;
+    font: inherit;
+    font-size: 13px;
+    padding: 7px 10px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--card);
+    color: var(--text);
+  }
+  .open-row input:focus { outline: none; border-color: var(--primary); }
+  .open-row input::placeholder { color: var(--muted); }
+
+  .recent-wrap { margin-top: 14px; }
+  .recent-head {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    color: var(--muted);
+    font-size: 12px;
+  }
+  .recent-head .clear {
+    padding: 2px 8px;
+    border: none;
+    background: transparent;
+    color: var(--muted);
+    font-size: 12px;
+  }
+  .recent-head .clear:hover:not(:disabled) { color: var(--danger); border: none; }
+  .recent { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+  .recent-item {
+    max-width: 100%;
+    padding: 4px 10px;
+    border-radius: 999px;
+    font-family: Consolas, "Courier New", monospace;
+    font-size: 12px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .modal {
+    position: fixed;
+    inset: 0;
+    z-index: 10;
+    display: none;
+    align-items: center;
+    justify-content: center;
+    padding: 20px;
+    background: rgba(0, 0, 0, 0.45);
+  }
+  .modal.open { display: flex; }
+  .modal-card {
+    display: flex;
+    flex-direction: column;
+    width: min(560px, 100%);
+    max-height: min(620px, 88vh);
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    box-shadow: 0 12px 32px rgba(0, 0, 0, 0.24);
+  }
+  .modal-head {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 12px 16px;
+    border-bottom: 1px solid var(--border);
+  }
+  .modal-head h3 { flex: 1; margin: 0; font-size: 15px; font-weight: 600; }
+  .modal-head .close {
+    padding: 4px 8px;
+    border: none;
+    background: transparent;
+    font-size: 16px;
+  }
+  .browse-path {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 16px;
+    border-bottom: 1px solid var(--border);
+  }
+  .browse-path .path {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: var(--text-2);
+    font-family: Consolas, "Courier New", monospace;
+    font-size: 12px;
+  }
+  .browse-list { flex: 1; min-height: 120px; overflow: auto; padding: 6px 8px; }
+  .dir-item {
+    display: block;
+    width: 100%;
+    padding: 7px 10px;
+    border: none;
+    border-radius: 5px;
+    background: transparent;
+    color: var(--text-2);
+    text-align: left;
+    font-family: Consolas, "Courier New", monospace;
+    font-size: 12px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .dir-item:hover:not(:disabled) { background: rgba(64, 158, 255, 0.1); color: var(--primary); border: none; }
+  .modal-foot {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+    padding: 12px 16px;
+    border-top: 1px solid var(--border);
+  }
+
+  @media (max-width: 560px) {
+    body { padding: 18px 12px 30px; }
+    .open-row { flex-wrap: wrap; }
+    .open-row input { flex: 1 1 100%; }
+    .project { flex-wrap: wrap; }
+    .project-actions { width: 100%; justify-content: flex-end; }
+  }
+</style>
+</head>
+<body>
+<div class="page">
+  <header>
+    <div class="titles">
+      <h1>Workflow Studio</h1>
+      <p class="sub">打开一个项目目录，启动它的可视化工作流编辑器。</p>
+    </div>
+    <span id="health" class="health">检测中…</span>
+  </header>
+
+  <div id="message" class="message" role="status" aria-live="polite" hidden></div>
+
+  <section>
+    <div class="section-head">
+      <h2>运行中的项目</h2>
+      <span class="section-note">每 2 秒自动刷新</span>
+    </div>
+    <div id="projects"></div>
+  </section>
+
+  <section>
+    <div class="section-head">
+      <h2>打开项目</h2>
+      <span class="section-note">填项目根目录，或从最近项目里选</span>
+    </div>
+    <div class="open-row">
+      <input id="path-input" type="text" spellcheck="false" autocomplete="off"
+             placeholder="例如 D:\work\my-project">
+      <button id="browse-btn" type="button">浏览…</button>
+      <button id="open-btn" type="button" class="primary">打开</button>
+    </div>
+    <div id="recent-wrap" class="recent-wrap" hidden>
+      <div class="recent-head">
+        <span>最近项目</span>
+        <button id="recent-clear" class="clear" type="button">清空</button>
+      </div>
+      <div id="recent" class="recent"></div>
+    </div>
+  </section>
+</div>
+
+<div id="browser" class="modal" role="dialog" aria-modal="true" aria-labelledby="browse-title">
+  <div class="modal-card">
+    <div class="modal-head">
+      <h3 id="browse-title">选择项目文件夹</h3>
+      <button id="browse-close" class="close" type="button" aria-label="关闭">×</button>
+    </div>
+    <div class="browse-path">
+      <span id="browse-path" class="path"></span>
+      <button id="browse-up" type="button">上级</button>
+    </div>
+    <div id="browse-list" class="browse-list"></div>
+    <div class="modal-foot">
+      <button id="browse-cancel" type="button">取消</button>
+      <button id="browse-pick" type="button" class="primary">选择此文件夹</button>
+    </div>
+  </div>
+</div>
+
+<script>
+(function () {
+  'use strict'
+
+  var RECENT_KEY = 'workflow-studio.recent'
+  var RECENT_LIMIT = 10
+  var POLL_MS = 2000
+
+  var state = {
+    projects: [],
+    projectsError: '',
+    busy: {},
+    opening: false,
+    recent: [],
+    signature: '',
+    messageTimer: 0,
+    browse: { path: '', parent: null, entries: [], fromRoot: true, error: '' },
+  }
+
+  // ---- 小工具 -----------------------------------------------------------
+
+  function $(id) {
+    return document.getElementById(id)
+  }
+
+  function el(tag, className, text) {
+    var node = document.createElement(tag)
+    if (className) node.className = className
+    if (text !== undefined) node.textContent = text
+    return node
+  }
+
+  function button(label, className, onClick) {
+    var node = el('button', className, label)
+    node.type = 'button'
+    node.addEventListener('click', onClick)
+    return node
+  }
+
+  function message(tone, text) {
+    var box = $('message')
+    window.clearTimeout(state.messageTimer)
+    box.textContent = text
+    box.className = 'message ' + tone
+    box.hidden = !text
+    if (tone === 'success' && text) {
+      state.messageTimer = window.setTimeout(function () {
+        box.textContent = ''
+        box.hidden = true
+      }, 4000)
+    }
+  }
+
+  function setHealth(ok) {
+    var chip = $('health')
+    chip.textContent = ok ? '后端在线' : '后端未连接'
+    chip.className = 'health ' + (ok ? 'ok' : 'bad')
+  }
+
+  // ---- 接口 -------------------------------------------------------------
+
+  function api(path, options) {
+    return fetch(path, options).then(
+      function (response) {
+        return response.json().then(
+          function (payload) {
+            if (!payload || typeof payload !== 'object') {
+              return { ok: false, errors: ['后端返回了无法解析的响应（HTTP ' + response.status + '）'] }
+            }
+            if (payload.ok !== true) {
+              var errors = Array.isArray(payload.errors) && payload.errors.length
+                ? payload.errors
+                : ['后端返回失败，但没有给出原因（HTTP ' + response.status + '）']
+              return { ok: false, errors: errors }
+            }
+            return payload
+          },
+          function () {
+            return { ok: false, errors: ['后端返回了无法解析的响应（HTTP ' + response.status + '）'] }
+          }
+        )
+      },
+      function (error) {
+        return {
+          ok: false,
+          errors: ['无法连接后端：' + (error && error.message ? error.message : '网络错误')],
+        }
+      }
+    )
+  }
+
+  function post(path, body) {
+    return api(path, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    })
+  }
+
+  function reportErrors(payload) {
+    message('error', payload.errors.join('；'))
+  }
+
+  // ---- 项目列表 ---------------------------------------------------------
+
+  function loadProjects(quiet) {
+    return api('/api/projects').then(function (payload) {
+      if (!payload.ok) {
+        setHealth(false)
+        state.projectsError = payload.errors.join('；')
+        renderProjects()
+        if (!quiet) reportErrors(payload)
+        return
+      }
+      setHealth(true)
+      state.projectsError = ''
+      state.projects = Array.isArray(payload.projects) ? payload.projects : []
+      var signature = JSON.stringify(state.projects)
+      if (signature !== state.signature) {
+        state.signature = signature
+        renderProjects()
+      }
+    })
+  }
+
+  function renderProjects() {
+    var list = $('projects')
+    list.textContent = ''
+    if (state.projectsError) {
+      list.appendChild(el('div', 'empty error', '无法获取项目列表：' + state.projectsError))
+      return
+    }
+    if (!state.projects.length) {
+      list.appendChild(el('div', 'empty', '还没有运行中的项目。在下面填项目目录，点「打开」启动。'))
+      return
+    }
+    state.projects.forEach(function (project) {
+      list.appendChild(projectRow(project))
+    })
+  }
+
+  function projectRow(project) {
+    var row = el('div', 'project')
+    var info = el('div', 'project-info')
+    info.appendChild(el('div', 'project-name', project.name))
+    var meta = el('div', 'project-meta')
+    var root = el('span', 'project-root', project.root)
+    root.title = project.root
+    meta.appendChild(root)
+    meta.appendChild(el('span', 'project-port', ':' + project.port))
+    info.appendChild(meta)
+    row.appendChild(info)
+
+    var busy = state.busy[project.root] || ''
+    var actions = el('div', 'project-actions')
+    var openButton = button('打开', '', function () {
+      window.open(project.url, '_blank')
+    })
+    var closeButton = button(busy === 'close' ? '关闭中…' : '关闭', 'danger', function () {
+      closeProject(project)
+    })
+    var restartButton = button(busy === 'restart' ? '重启中…' : '重启', '', function () {
+      restartProject(project)
+    })
+    if (busy) {
+      openButton.disabled = true
+      closeButton.disabled = true
+      restartButton.disabled = true
+    }
+    actions.appendChild(openButton)
+    actions.appendChild(closeButton)
+    actions.appendChild(restartButton)
+    row.appendChild(actions)
+    return row
+  }
+
+  function setBusy(root, label) {
+    if (label) state.busy[root] = label
+    else delete state.busy[root]
+    renderProjects()
+  }
+
+  function closeProject(project) {
+    if (state.busy[project.root]) return
+    setBusy(project.root, 'close')
+    return post('/api/projects/close', { root: project.root }).then(function (payload) {
+      setBusy(project.root, '')
+      if (!payload.ok) {
+        reportErrors(payload)
+        return
+      }
+      message('success', '已关闭「' + project.name + '」')
+      return loadProjects(true)
+    })
+  }
+
+  function restartProject(project) {
+    if (state.busy[project.root]) return
+    setBusy(project.root, 'restart')
+    return post('/api/projects/restart', { root: project.root }).then(function (payload) {
+      setBusy(project.root, '')
+      if (!payload.ok) {
+        reportErrors(payload)
+        return
+      }
+      message('success', '已重启「' + project.name + '」')
+      return loadProjects(true)
+    })
+  }
+
+  // ---- 打开项目 ---------------------------------------------------------
+
+  function openProject() {
+    if (state.opening) return
+    var input = $('path-input')
+    var path = input.value.trim()
+    if (!path) {
+      message('error', '先填项目目录，或点「浏览…」选一个。')
+      input.focus()
+      return
+    }
+
+    state.opening = true
+    $('open-btn').disabled = true
+    // 先同步占位一个标签页，避免 await 之后被浏览器当成弹窗拦截
+    var tab = window.open('', '_blank')
+
+    return post('/api/projects', { path: path }).then(function (payload) {
+      state.opening = false
+      $('open-btn').disabled = false
+      if (!payload.ok) {
+        if (tab) tab.close()
+        reportErrors(payload)
+        return
+      }
+      var project = payload.project
+      remember(project.root)
+      message('success', '已启动「' + project.name + '」，端口 ' + project.port + '。')
+      if (tab) tab.location.href = project.url
+      else window.open(project.url, '_blank')
+      return loadProjects(true)
+    })
+  }
+
+  // ---- 最近项目 ---------------------------------------------------------
+
+  function loadRecent() {
+    try {
+      var raw = JSON.parse(window.localStorage.getItem(RECENT_KEY) || '[]')
+      if (!Array.isArray(raw)) return []
+      return raw.filter(function (item) {
+        return typeof item === 'string' && item.trim() !== ''
+      }).slice(0, RECENT_LIMIT)
+    } catch (error) {
+      return []
+    }
+  }
+
+  function saveRecent() {
+    try {
+      window.localStorage.setItem(RECENT_KEY, JSON.stringify(state.recent))
+    } catch (error) {
+      // 隐私模式等写不进去，只影响下次打开
+    }
+  }
+
+  function remember(path) {
+    var key = path.toLowerCase()
+    state.recent = [path].concat(state.recent.filter(function (item) {
+      return item.toLowerCase() !== key
+    })).slice(0, RECENT_LIMIT)
+    saveRecent()
+    renderRecent()
+  }
+
+  function renderRecent() {
+    var wrap = $('recent-wrap')
+    var list = $('recent')
+    list.textContent = ''
+    wrap.hidden = state.recent.length === 0
+    state.recent.forEach(function (path) {
+      var item = button(path, 'recent-item', function () {
+        $('path-input').value = path
+        $('open-btn').focus()
+      })
+      item.title = path
+      list.appendChild(item)
+    })
+  }
+
+  function clearRecent() {
+    state.recent = []
+    saveRecent()
+    renderRecent()
+  }
+
+  // ---- 目录浏览 ---------------------------------------------------------
+
+  function openBrowser() {
+    $('browser').classList.add('open')
+    $('browse-list').textContent = ''
+    $('browse-path').textContent = '加载中…'
+    $('browse-up').disabled = true
+    $('browse-pick').disabled = true
+    loadDirs('')
+  }
+
+  function closeBrowser() {
+    $('browser').classList.remove('open')
+  }
+
+  function loadDirs(path) {
+    return api('/api/fs/dirs?path=' + encodeURIComponent(path)).then(function (payload) {
+      if (!payload.ok) {
+        state.browse = { path: path, parent: null, entries: [], fromRoot: path === '', error: payload.errors.join('；') }
+        renderBrowser()
+        return
+      }
+      state.browse = {
+        path: payload.path,
+        parent: payload.parent,
+        entries: Array.isArray(payload.entries) ? payload.entries : [],
+        fromRoot: path === '',
+        error: '',
+      }
+      renderBrowser()
+    })
+  }
+
+  function renderBrowser() {
+    var browse = state.browse
+    var pathLabel = browse.path || '此电脑'
+    $('browse-path').textContent = pathLabel
+    $('browse-path').title = pathLabel
+    $('browse-up').disabled = browse.fromRoot
+    $('browse-pick').disabled = browse.fromRoot || !browse.path
+
+    var list = $('browse-list')
+    list.textContent = ''
+    if (browse.error) {
+      list.appendChild(el('div', 'empty error', browse.error))
+      return
+    }
+    if (!browse.entries.length) {
+      list.appendChild(el('div', 'empty', browse.fromRoot ? '没有检测到可用的磁盘。' : '这个文件夹里没有子目录。'))
+      return
+    }
+    browse.entries.forEach(function (entry) {
+      var item = button(entry.name, 'dir-item', function () {
+        loadDirs(entry.path)
+      })
+      item.title = entry.path
+      list.appendChild(item)
+    })
+  }
+
+  function pickFolder() {
+    if ($('browse-pick').disabled) return
+    $('path-input').value = state.browse.path
+    closeBrowser()
+    $('open-btn').focus()
+  }
+
+  // ---- ?close=<root> ----------------------------------------------------
+
+  function handleCloseQuery() {
+    var params = new URLSearchParams(window.location.search)
+    var root = params.get('close')
+    if (!root) return Promise.resolve()
+
+    params.delete('close')
+    var query = params.toString()
+    try {
+      window.history.replaceState({}, '', window.location.pathname + (query ? '?' + query : '') + window.location.hash)
+    } catch (error) {
+      // file:// 等场景改不了地址栏，不影响关闭动作
+    }
+
+    return post('/api/projects/close', { root: root }).then(function (payload) {
+      if (!payload.ok) {
+        reportErrors(payload)
+        return
+      }
+      message('success', '已关闭项目')
+    })
+  }
+
+  // ---- 启动 -------------------------------------------------------------
+
+  function bindEvents() {
+    $('open-btn').addEventListener('click', openProject)
+    $('path-input').addEventListener('keydown', function (event) {
+      if (event.key === 'Enter') openProject()
+    })
+    $('browse-btn').addEventListener('click', openBrowser)
+    $('browse-close').addEventListener('click', closeBrowser)
+    $('browse-cancel').addEventListener('click', closeBrowser)
+    $('browse-pick').addEventListener('click', pickFolder)
+    $('browse-up').addEventListener('click', function () {
+      loadDirs(state.browse.parent || '')
+    })
+    $('recent-clear').addEventListener('click', clearRecent)
+    $('browser').addEventListener('click', function (event) {
+      if (event.target === $('browser')) closeBrowser()
+    })
+    document.addEventListener('keydown', function (event) {
+      if (event.key === 'Escape' && $('browser').classList.contains('open')) closeBrowser()
+    })
+  }
+
+  function start() {
+    state.recent = loadRecent()
+    renderRecent()
+    bindEvents()
+    api('/api/health').then(function (payload) {
+      setHealth(payload.ok)
+    })
+    loadProjects(true)
+    handleCloseQuery().then(function () {
+      return loadProjects(true)
+    })
+    window.setInterval(function () {
+      if (!document.hidden) loadProjects(true)
+    }, POLL_MS)
+  }
+
+  start()
+})()
+</script>
+</body>
+</html>
