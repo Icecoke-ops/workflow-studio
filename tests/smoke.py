@@ -22,7 +22,9 @@ from engine.runner import run  # noqa: E402
 from engine.workflow import validate  # noqa: E402
 from tools.build_plugins import build_all  # noqa: E402
 
-WORKFLOW = ROOT / "workflows" / "regression_demo.json"
+from _harness import DEMO_WORKFLOW  # noqa: E402
+
+WORKFLOW = DEMO_WORKFLOW
 
 
 def check(condition, message):

@@ -19,6 +19,9 @@ RUN_ID_RE = re.compile(r"^\d{8}-\d{6}-[0-9a-f]{4}$")
 _ROOT = Path(__file__).resolve().parent.parent
 _REGISTRY = None
 
+# 回归演示工作流：唯一被测试依赖的示例已迁成 tests/fixtures 夹具。
+DEMO_WORKFLOW = _ROOT / "tests" / "fixtures" / "regression_demo.flow"
+
 
 def check(condition, message):
     if not condition:

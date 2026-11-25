@@ -7,7 +7,7 @@
 ## 设计约定
 
 - **引擎薄，插件厚**：引擎不理解业务，只负责加载、校验、排序、执行。
-- **JSON 是唯一事实来源**：一个工作流就是一个 JSON 文件，没有数据库、没有隐藏状态。
+- **JSON 是唯一事实来源**：一个工作流就是一个 JSON 文件，没有数据库、没有隐藏状态。工作流文件习惯用 `.flow` 后缀，内容仍是 JSON；引擎按内容解析，不看扩展名。
 - **插件是 zip 包**：`plugins/<插件名>.zip`，声明与实现分离。
 - **类型不写进工作流**：端口类型来自插件 schema，JSON 里只写连到哪个节点的哪个端口。
 - **只管 DAG**：循环暂不支持，有环直接报错。
@@ -23,12 +23,11 @@
 | `plugins/src/split/` | 数据划分：切训练/测试集、按列拆特征 X 与目标 Y（2 个组件） |
 | `plugins/src/ml/` | 机器学习：5 个回归模型、回归评估、模型保存与加载（依赖 scikit-learn、joblib） |
 | `plugins/src/core/` | 模型应用：`PredictModel`，接任何符合 `std_1.0@model` 的模型 |
-| `studio/` | 本地 Web 后端（标准库 `ThreadingHTTPServer`）+ 前端构建产物 |
+| `studio/` | 本地 Web 后端（标准库 `ThreadingHTTPServer`）：落地页、项目服务、前端构建产物 |
 | `hooks/` | 执行钩子：日志、调试服务。与 `plugins/` 同级，**不进引擎包**，可单独分发 |
 | `frontend/` | Vite + Vue 3 可视化编辑器源码 |
 | `tools/` | 打包插件、构建前端 |
-| `tests/` | 测试套件 |
-| `workflows/` | 示例工作流 |
+| `tests/` | 测试套件；`tests/fixtures/` 放示例工作流等夹具 |
 | `docs/` | 对外契约文档 |
 
 ## 内置组件
@@ -61,7 +60,7 @@ python tools/build_plugins.py
 
 **2. 准备数据**
 
-示例工作流从 `${workspace}/data.csv` 读数据，仓库不附带任何数据文件。在工作目录放一个两列 CSV 就行，`x` 是特征、`y` 是目标：
+示例工作流 `tests/fixtures/regression_demo.flow` 从 `${workspace}/data.csv` 读数据，仓库不附带任何数据文件。在工作目录放一个两列 CSV 就行，`x` 是特征、`y` 是目标：
 
 ```csv
 x,y
@@ -74,11 +73,11 @@ x,y
 
 ```bash
 python -m engine plugins                          # 列出插件、类型、组件和端口
-python -m engine validate workflows/regression_demo.json
-python -m engine run workflows/regression_demo.json
+python -m engine validate tests/fixtures/regression_demo.flow
+python -m engine run tests/fixtures/regression_demo.flow
 ```
 
-跑通的示例会打印每个节点的耗时和输出摘要，最后给出 MSE / RMSE / MAE / R² / MAPE。
+跑通的示例会打印每个节点的耗时和输出摘要，最后给出 MSE / RMSE / MAE / R² / MAPE，并把评估指标写到工作目录的 `regression_out.csv`。
 
 **插件从哪加载**
 
@@ -116,20 +115,19 @@ self.path = expand_env(config["path"])    # "${workspace}/data/sales.csv"
 ```bash
 npm --prefix frontend install      # 首次需要
 python tools/build_web.py          # 构建前端并拷贝到 studio/web
-python -m studio --port 8765
+python -m studio                   # 起落地页，默认 8765
 ```
 
-打开 <http://127.0.0.1:8765>。改完前端代码后重新执行 `python tools/build_web.py` 即可，刷新页面生效。
+打开 <http://127.0.0.1:8765>，在落地页选一个项目目录（或直接输入路径），项目会以一个独立子进程、随机端口打开工作台的新标签页：左侧资源管理器直接读写该目录，`.flow` 进画布，其它文本只读预览，`Ctrl+S` 保存回盘。
 
-调试面板直连 `hooks/http_debug` 钩子，它依赖 `websockets`（已列在 `requirements.txt` 里）。没装的话 Studio 照样能起，但一开调试就会报 `ModuleNotFoundError`。
+- 一个项目一个进程，可以同时开多个项目，各占一个浏览器标签页，互不干扰。
+- 项目目录下的 `plugins/*.zip` 是项目插件，与引擎旁 `plugins/` 的全局插件一起加载；同名插件直接报错标出，非插件 zip 跳过并提示。
+- 换掉或新增插件后点「重启项目」让插件生效（zip 会被 zipimport 缓存，只能重启进程）。「关闭项目」结束对应子进程，落地页不受影响。
+- 落地页与项目服务都只绑 `127.0.0.1`：服务没有认证，能连上端口的人就能调 `/api/run`、读写项目文件，所以不提供局域网暴露。
 
-Studio 的其他参数：
+改完前端代码后重新执行 `python tools/build_web.py` 即可，刷新页面生效。
 
-```bash
-python -m studio --plugins-dir D:\workspace\space --host 127.0.0.1 --port 8765
-```
-
-`--host` 默认只绑本机。想让局域网里的其它机器访问，要同时加 `--allow-remote`——服务没有认证，能连上端口的人都能调 `/api/run`，用组件读写本机文件。
+调试面板直连 `hooks/http_debug` 钩子，它依赖 `websockets`（已列在 `requirements.txt` 里）。没装的话 Studio 照样能起，但一开调试就会报 `ModuleNotFoundError`。调试用的是第三个独立进程，cwd 与 `/api/run` 一致，都是项目根。
 
 ## 工作流长什么样
 
@@ -162,7 +160,7 @@ python -m studio --plugins-dir D:\workspace\space --host 127.0.0.1 --port 8765
 }
 ```
 
-节点只有五个字段：`id`、`plugin`、`component`、`config`、`inputs`。连线是 `inputs.<输入端口> = {"from": 上游节点 id, "port": 上游输出端口}`。没有输入的节点就是起点，不存在专门的 start 节点。
+节点只有五个字段：`id`、`plugin`、`component`、`config`、`inputs`。连线是 `inputs.<输入端口> = {"from": 上游节点 id, "port": 上游输出端口}`。没有输入的节点就是起点，不存在专门的 start 节点。文件内容就是这张图，扩展名 `.flow` 只是编辑器用来判断「点开它该进画布」；命令行接受任意扩展名的 JSON。
 
 ## 写一个插件
 
@@ -222,7 +220,7 @@ def on_node_end(data, execution):
 ```
 
 ```bash
-python -m engine run --hook hooks/my_log workflows/regression_demo.json
+python -m engine run --hook hooks/my_log tests/fixtures/regression_demo.flow
 ```
 
 回调签名是 `fn(data, execution)`，**原地改 `data` 就生效**（引擎只回读该事件允许改的字段，其余忽略）。比如 `node_invoke_before` 能改节点输入、`node_end` 能改输出、`workflow_loaded` 能改整张图。目录里有 `__init__.py` 时按 Python 包加载，可以拆成多个文件。
@@ -241,7 +239,7 @@ python -m engine run --hook hooks/my_log workflows/regression_demo.json
 ## 测试
 
 ```bash
-python tests/run_all.py            # 引擎/插件/CLI 全量用例
+python tests/run_all.py            # 全量用例（引擎、插件、CLI、Studio、前端）
 python tests/smoke.py              # 端到端冒烟
 python tests/test_studio_api.py    # Web 后端接口
 ```

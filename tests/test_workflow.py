@@ -15,7 +15,15 @@ if str(ROOT) not in sys.path:
 from engine.errors import WorkflowError
 from engine.workflow import load_workflow, validate
 
-from _harness import check, expect_raises, get_registry, node, run_cases, run_workflow
+from _harness import (
+    DEMO_WORKFLOW,
+    check,
+    expect_raises,
+    get_registry,
+    node,
+    run_cases,
+    run_workflow,
+)
 
 
 def source_node(node_id, extra_config=None):
@@ -42,10 +50,10 @@ def expect_warning(report, *fragments):
 
 
 def case_demo_valid():
-    raw = load_workflow(ROOT / "workflows" / "regression_demo.json")
+    raw = load_workflow(DEMO_WORKFLOW)
     report = validate(get_registry(), raw)
-    check(report.ok, f"regression_demo.json 应校验通过，实际错误：{report.errors}")
-    check(report.warnings == [], f"regression_demo.json 不应有警告：{report.warnings}")
+    check(report.ok, f"regression_demo.flow 应校验通过，实际错误：{report.errors}")
+    check(report.warnings == [], f"regression_demo.flow 不应有警告：{report.warnings}")
     check(
         report.order == ["n1", "n2", "n3", "n4", "n5", "n6", "n7"],
         f"拓扑顺序不对：{report.order}",
@@ -292,7 +300,7 @@ def case_name_not_string():
 
 def case_load_workflow_errors():
     expect_raises(
-        WorkflowError, lambda: load_workflow(ROOT / "workflows" / "nope.json"), "不存在"
+        WorkflowError, lambda: load_workflow(DEMO_WORKFLOW.parent / "nope.json"), "不存在"
     )
     with tempfile.TemporaryDirectory(prefix="engine_workflow_test_") as tmp:
         bad = Path(tmp) / "bad.json"
@@ -410,7 +418,7 @@ def case_node_level_addition_rejected():
 
 
 CASES = [
-    ("regression_demo.json 校验通过且顺序正确", case_demo_valid),
+    ("regression_demo.flow 校验通过且顺序正确", case_demo_valid),
     ("core.PredictModel 端口类型", case_predict_model_ports),
     ("未知顶层字段", case_unknown_top_field),
     ("节点未知字段", case_node_unknown_field),

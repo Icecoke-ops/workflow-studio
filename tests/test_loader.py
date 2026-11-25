@@ -375,10 +375,11 @@ def case_stdlib_module_rejected_without_breaking_process():
         "sys 模块变成了缺 path 的残骸",
     )
     try:
-        importlib.util.find_spec("workflows")
+        # 任意不存在的模块名即可：这里只验证 sys 的查找链没被 purge 坏。
+        importlib.util.find_spec("engine_sys_probe_absent_module")
     except AttributeError as exc:
         raise AssertionError(
-            f"find_spec('workflows') 抛 AttributeError，说明 sys 已残：{exc}"
+            f"find_spec 抛 AttributeError，说明 sys 已残：{exc}"
         ) from None
 
 

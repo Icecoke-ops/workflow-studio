@@ -18,6 +18,7 @@ if str(ROOT) not in sys.path:
 from engine.cli import _force_utf8, main as cli_main
 
 from _harness import (
+    DEMO_WORKFLOW,
     RUN_ID_RE,
     check,
     env_guard,
@@ -29,7 +30,7 @@ from _harness import (
 )
 
 PLUGINS = str(ROOT / "plugins")
-DEMO = str(ROOT / "workflows" / "regression_demo.json")
+DEMO = str(DEMO_WORKFLOW)
 
 
 def call_cli(argv):
@@ -120,7 +121,9 @@ def case_run_bad():
 
 
 def case_missing_file():
-    code, out, err = call_cli(["-p", PLUGINS, "validate", str(ROOT / "workflows" / "nope.json")])
+    code, out, err = call_cli(
+        ["-p", PLUGINS, "validate", str(DEMO_WORKFLOW.parent / "nope.json")]
+    )
     check(code == 1, f"不存在的文件应 exit 1，实际 {code}")
     check("[读取失败]" in err, f"stderr 缺少 [读取失败]：{err!r}")
 

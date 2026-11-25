@@ -21,7 +21,7 @@ from engine.registry import Registry
 from engine.runner import run
 from engine.workflow import NodeSpec, Workflow, load_workflow, validate
 
-from _harness import check, env_guard, expect_raises, run_cases, write_demo_data
+from _harness import DEMO_WORKFLOW, check, env_guard, expect_raises, run_cases, write_demo_data
 
 
 _RUNNER_SOURCE = '''\
@@ -474,7 +474,7 @@ def case_end_to_end_demo():
     with tempfile.TemporaryDirectory(prefix="engine_runner_demo_") as tmp, env_guard():
         os.environ["workspace"] = tmp
         write_demo_data(tmp)
-        raw = load_workflow(ROOT / "workflows" / "regression_demo.json")
+        raw = load_workflow(DEMO_WORKFLOW)
         report = validate(registry, raw)
         check(report.ok, f"示例工作流应校验通过：{report.errors}")
 

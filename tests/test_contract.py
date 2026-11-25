@@ -24,9 +24,9 @@ from studio.contract import (
 from studio.project import Project
 from studio.server import EngineService
 
-from _harness import check, expect_raises, run_cases, write_demo_data
+from _harness import DEMO_WORKFLOW, check, expect_raises, run_cases, write_demo_data
 
-DEMO = ROOT / "workflows" / "regression_demo.json"
+DEMO = DEMO_WORKFLOW
 
 
 # ---- 载荷构造 ----

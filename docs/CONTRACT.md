@@ -186,6 +186,7 @@ class LoadCSV(Component):
 - 边记在输入侧；一个输入端口只能有一个来源。
 - 无输入的节点即起点，没有特殊 start 节点。
 - 文件编码必须是 UTF-8（可带 BOM）；GBK 等其它编码直接报错。
+- 扩展名习惯用 `.flow`，内容就是本节的 JSON。引擎与 CLI 不检查扩展名；Studio 按 `.flow` 判断「点开进画布」，其它文本文件只读预览。
 - `name` 必须是字符串；省略可以，写成 `null`/数字/布尔会被拒。
 
 ### 5.1 环境变量
@@ -204,7 +205,7 @@ class LoadCSV(Component):
 
 | 变量 | 值 |
 |---|---|
-| `workspace` | 进程启动时的工作目录（绝对路径） |
+| `workspace` | 进程启动时的工作目录（绝对路径）；Studio 下是项目根 |
 | `engine_version` | 引擎版本 |
 | `workflow` | 本次运行的 JSON 绝对路径；Studio 下是写入系统临时目录的副本 |
 | `run_id` | 本次运行标识（时间戳 + 短随机串），每跑一次都不同 |
@@ -255,40 +256,79 @@ self.path = expand_env(config["path"])   # "${workspace}/data/x.csv"
 
 ## 6. Studio HTTP API
 
+Studio 是两层进程：
+
+| 进程 | 启动方式 | 端口 | 职责 |
+|---|---|---|---|
+| launcher（落地页） | `python -m studio` | 固定，默认 8765 | 管理项目子进程、浏览服务端目录、发落地页 |
+| 项目服务 | launcher 拉起 `python -m studio --serve <项目根>` | 随机（`--port 0`），实际端口写进 `--port-file` | 项目内文件读写、插件加载、校验/执行/调试 |
+
+`--serve` 是内部参数，用户入口只有 `python -m studio`。打开一个目录起一个项目进程；同一目录再次打开复用已运行实例；关闭即结束子进程；重启是在**同一端口**重起（端口未释放时重试 10 次 × 100 ms，仍失败回「端口被占用，重启失败」，不偷换端口）。项目进程启动后 `chdir` 到项目根，`/api/run` 与调试子进程里的相对路径都按项目根解析。
+
+两个服务都只绑 `127.0.0.1`，没有远程访问开关。
+
+### 6.1 launcher API
+
 所有响应 UTF-8，`Content-Type: application/json; charset=utf-8`。
+
+| 方法 | 路径 | 请求 / 响应 |
+|---|---|---|
+| GET | `/api/health` | `{"ok":true}` |
+| GET | `/api/projects` | `{"ok":true,"projects":[{"root","name","port","pid","url"}],"errors":[]}` |
+| POST | `/api/projects` | `{"path":"<目录>"}` → `{"ok":true,"project":{"root","name","port","pid","url"}}`；失败 `ok:false`、`project:null` |
+| POST | `/api/projects/close` | `{"root":"<目录>"}` → `{"ok":true,"errors":[]}`；未运行回 `ok:false` |
+| POST | `/api/projects/restart` | `{"root":"<目录>"}` → 同 open |
+| GET | `/api/fs/dirs` | `?path=<目录>`，空串表示盘符列表 → `{"ok":true,"path","parent","entries":[{"name","path"}]}`；`path` 为空串、`parent` 为 null 表示盘符层 |
+| GET | `/` | `studio/landing/index.html`（单文件静态页，无外部资源） |
+
+`url` 是 `http://127.0.0.1:<port>`，落地页在新标签页直接跳过去。打开项目时如果同目录已有实例，返回同一个 `port`/`pid`，不另起进程。
+
+### 6.2 项目服务 API
 
 | 方法 | 路径 | 响应 |
 |---|---|---|
 | GET | `/api/health` | `{"ok":true,"engine":"0.6.2","plugins":6,"components":27}` |
 | GET | `/api/plugins` | `{"plugins":[{name,version,title,types:[{id,desc}],components:[{name,title,desc,config_schema,input_schema,output_schema}]}]}` |
+| GET | `/api/project` | `{"ok":true,"root","name","launcher","plugins":{"global":n,"project":n},"skipped":[{"file","path","reason","source"}],"errors":[]}` |
+| GET | `/api/tree` | `?path=<项目内相对路径>`（空串=项目根）→ `{"ok":true,"path","entries":[{name,path,kind:"dir"\|"file",size?}],"errors":[]}`，只列一层，目录在前 |
+| GET | `/api/file` | `?path=` → `{"ok":true,"path","kind":"text"\|"binary"\|"too_large","size","text","errors":[]}` |
+| POST | `/api/file` | `{"path","text"}` → `{"ok":true,"path","size","errors":[]}`，原子写 |
+| POST | `/api/mkdir` | `{"path"}` → `{"ok":true,"path","errors":[]}` |
+| POST | `/api/rename` | `{"path","new_name"}` → `{"ok":true,"path","errors":[]}`；只改名，`new_name` 不能带分隔符 |
+| POST | `/api/delete` | `{"path"}` → `{"ok":true,"path","errors":[]}`；目录必须为空，项目根不可删 |
 | POST | `/api/validate` | 请求 `{"workflow":{...}}` → `{"ok":bool,"errors":[],"warnings":[],"order":[]}` |
 | POST | `/api/run` | 请求同上 → `{"ok":bool,"errors":[],"warnings":[],"order":[],"nodes":[{id,component,ms,outputs:{端口:preview},"error":null}]}` |
 | POST | `/api/debug/start` | 请求同上 → `{"ok":true,"session":"<id>","port":8801,"token":"<随机串>"}` |
 | POST | `/api/debug/stop` | 请求 `{"session":"<id>"}` → `{"ok":true}` |
-| GET | `/`、`/static/*` | 回 `studio/web/` 下的静态文件 |
+| GET | `/`、`/static/*` | 回 `studio/web/` 下的文件（`/` 回 `index.html`） |
 
 `engine` 是引擎版本字符串（取自 `engine/__init__.py` 的 `__version__`），**示例里的数字随发版变化，不属于契约**；`plugins` / `components` 是当前加载的插件数与组件数。
 
 `input_schema` 每项额外带 `type_labels`（短名数组），`output_schema` 每项额外带 `type_label`，供界面显示。
 
-错误口径：请求体不是 JSON 对象（解析失败、顶层不是对象、缺 `workflow`）回 400，未知路径回 404，请求体超过 16 MiB 回 413，响应体均为 `{"ok":false,"errors":[具体消息]}`。业务失败（校验不通过、执行期异常）回 200 + `ok:false`，原因进 `errors`——`/api/run` 的执行期异常**不回 500**。服务端自身**载荷违反契约**（`ContractError`，我方 bug）回 500 + 字段级消息，原样给调用方；其余**意外异常**回 500 + `{"ok":false,"errors":["服务器内部错误"]}`，完整栈只写服务端日志，不把内部路径或异常原文暴露给前端。客户端中途断开直接静默，不写响应。
+插件加载：全局目录（引擎包同级 `plugins/`）始终参与；项目根下 `plugins/` 存在时作为项目插件一起加载。同名插件硬报错——`/api/project` 回 `ok:false`、`errors` 带两个绝对路径，`health` 的插件数归零，但文件接口照常可用；非插件 zip 只进 `skipped`（带 `source: "global"|"project"`），不报错。
 
-### 6.1 调试会话
+路径规则：所有 `path` 都是**项目内相对路径**，拒绝 `..`、绝对路径、盘符、UNC，也拒绝经链接（junction / 符号链接）指到项目外。文本文件上限 1 MiB，含 NUL 判为 `binary`。
+
+错误口径：请求体不是 JSON 对象（解析失败、顶层不是对象、缺 `workflow`）回 400，未知路径回 404，请求体超过 16 MiB 回 413，响应体均为 `{"ok":false,"errors":[具体消息]}`。业务失败（校验不通过、执行期异常、文件操作失败）回 200 + `ok:false`，原因进 `errors`——`/api/run` 的执行期异常**不回 500**。服务端自身**载荷违反契约**（`ContractError`，我方 bug）回 500 + 字段级消息，原样给调用方；其余**意外异常**回 500 + `{"ok":false,"errors":["服务器内部错误"]}`，完整栈只写服务端日志，不把内部路径或异常原文暴露给前端。客户端中途断开直接静默，不写响应。
+
+### 6.3 调试会话
 
 调试是**子进程 + 钩子**，Studio 自己不 import 引擎跑图。前端拿到 `port`/`token` 后直连钩子的 WebSocket（§9.6），Studio 只负责起和杀。
 
-- `start`：把请求里的 `workflow` 原样写进系统临时目录的 JSON，`secrets` 随机 token，spawn `python -m engine run --hook hooks/http_debug -e hook_port=0 -e hook_port_file=<临时目录>/debug_<session>.port -e hook_token=<token> <临时文件>`；**Studio 不自己挑端口**，只等钩子把 bind 时的实际端口写进那个文件（**超时 10 秒**，超时杀子进程、删临时文件、回 `ok:false`，并把子进程 stderr 尾部带进 `errors`）。子进程提前崩同样立刻失败，不等满超时。
+- `start`：把请求里的 `workflow` 原样写进系统临时目录的 JSON，`secrets` 随机 token，spawn `python -m engine run --hook hooks/http_debug -e workspace=<项目根> -e hook_port=0 -e hook_port_file=<临时目录>/debug_<session>.port -e hook_token=<token> <临时文件>`；**Studio 不自己挑端口**，只等钩子把 bind 时的实际端口写进那个文件（**超时 10 秒**，超时杀子进程、删临时文件、回 `ok:false`，并把子进程 stderr 尾部带进 `errors`）。子进程提前崩同样立刻失败，不等满超时。
   - 为什么不「先挑空闲端口再连一下」：端口在挑选和真正 bind 之间会被别人占走，而「连得上」无法区分自己的钩子和别人的监听——那会把别人的钩子当成就绪（已踩过，偶发 WebSocket 1000 关闭）。端口由 bind 分配、文件由钩子写完，窗口不存在。
-- **`--plugins-dir` 与 `-e` 必须原样透传给子进程**，否则调试子进程看到的插件和环境变量跟主进程不一致——那种差异以后极难查。**子进程的 `${workspace}` 必须等于 Studio 主进程的启动目录**（子进程 cwd 可能是仓库根，所以要用 `-e workspace=<Studio 启动目录>` 显式透传，且排在其他 `-e` 之前，让用户自己的覆盖仍然生效）；**相对路径的 `--plugins-dir` 必须先解析成绝对路径再传**。
+- **子进程 cwd = 项目根**，仓库根经 `PYTHONPATH` 注入（cwd 不再是仓库根，否则 `-m engine` 找不到）。`${workspace}` 显式传项目根，且排在其他 `-e` 之前，用户自己的覆盖仍然生效。
+- **插件必须原样透传**：项目根下有 `plugins/` 时追加 `--plugins-dir <项目根>/plugins`，与 Studio 主进程加载的是同一批 zip；否则调试子进程看到的插件跟主进程不一致，那种差异以后极难查。`-e` 同样原样透传。
 - **同一时刻只允许一个调试会话**；新 `start` 先按 `stop` 流程关掉旧的。
 - `stop`：先 `POST http://127.0.0.1:<port>/shutdown` 让它自己退，3 秒内没退就 `kill`；删临时文件。未知 `session` 回 `ok:false`。
 - 子进程的 stdout/stderr 由 Studio 接管，不混进 Studio 自己的输出；Studio 进程退出时关掉所有调试子进程。
 
-### 6.2 绑定与认证
+### 6.4 绑定与认证
 
-`--host` 默认只绑 `127.0.0.1`。绑非回环地址必须显式加 `--allow-remote`，否则**拒绝启动**：服务没有任何认证，能连上端口的人都可以调 `/api/run`，用组件读写本机任意文件。加了该参数会在 stderr 打出警告。不要把它当多用户服务用。
+launcher 与项目服务都固定绑 `127.0.0.1`。服务没有任何认证，能连上端口的人都可以调 `/api/run`、读写项目文件，所以不提供局域网暴露，也不要把它当多用户服务用。
 
-### 6.3 前端构建约束（踩过坑）
+### 6.5 前端构建约束（踩过坑）
 
 后端静态路由是 `/static/<file>` → `studio/web/<file>`（剥掉 `/static/` 前缀后按相对路径找文件）。所以 Vite 必须构建成：
 
@@ -311,8 +351,7 @@ base: '/static/'      // 构建时生效，dev 用 '/'
 | 指定插件目录 | `python -m engine run -p <dir> <json>` |
 | 指定环境变量 | `python -m engine -e DATA_DIR=D:\data -e MODEL_DIR=D:\models run <json>` |
 | 挂执行钩子 | `python -m engine run --hook <钩子路径> -e hook_port=<端口> -e hook_token=<token> <json>`（`http_debug` 还要 `-e hook_port_file=<文件>`，`hook_port=0` 即系统分配） |
-| 起 Web 服务 | `python -m studio --port 8765` |
-| 局域网暴露（无认证，慎用） | `python -m studio --host 0.0.0.0 --allow-remote` |
+| 起 Web 服务 | `python -m studio`（落地页，默认 8765；项目进程由它拉起） |
 | 构建前端 | `python tools/build_web.py` |
 | 冒烟 | `python tests/smoke.py` |
 | 全量测试 | `python tests/run_all.py` |
@@ -323,7 +362,7 @@ base: '/static/'      // 构建时生效，dev 用 '/'
 
 ## 8. 刻意不做（别再提）
 
-单 env 隔离、沙箱、环执行、并发分支、重试、断点续跑、中间产物落盘、撤销重做、自动布局、多标签页。
+单 env 隔离、沙箱、环执行、并发分支、重试、断点续跑、中间产物落盘、撤销重做、自动布局。
 
 ---
 

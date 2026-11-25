@@ -46,7 +46,9 @@ from studio.project import Project  # noqa: E402
 from studio.server import EngineService, StudioServer  # noqa: E402
 from websockets.sync.client import connect as ws_connect  # noqa: E402
 
-DEMO = ROOT / "workflows" / "regression_demo.json"
+from _harness import DEMO_WORKFLOW  # noqa: E402
+
+DEMO = DEMO_WORKFLOW
 DEBUG_DIR = Path(tempfile.gettempdir()) / "workflow-studio"
 
 
