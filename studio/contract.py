@@ -1,4 +1,7 @@
-"""Studio HTTP API 的契约。由 Chief 维护，**冻结**。
+"""Studio **项目服务** HTTP API 的契约。由 Chief 维护，**冻结**。
+
+launcher（落地页）的接口不在这里，见 ``studio/launcher_contract.py``。
+
 
 实现方（studio/server.py）必须做到：
 
@@ -16,7 +19,7 @@ class ContractError(Exception):
     """实现方返回的载荷不符合契约。"""
 
 
-# ---- 实现方必须实现的四个方法 ----
+# ---- 实现方必须实现的方法 ----
 
 class ApiService(ABC):
     """Studio 后端业务接口。传输层（HTTP）与业务逻辑必须分开。"""
@@ -36,6 +39,34 @@ class ApiService(ABC):
     @abstractmethod
     def run(self, workflow) -> dict:
         """校验并执行，返回每个节点的耗时与输出预览。"""
+
+    @abstractmethod
+    def project(self) -> dict:
+        """当前项目与插件加载概况。"""
+
+    @abstractmethod
+    def tree(self, path) -> dict:
+        """列一层目录；path 是项目内相对路径，空串表示项目根。"""
+
+    @abstractmethod
+    def read_file(self, path) -> dict:
+        """读文本；二进制或超过上限时只回类型与大小。"""
+
+    @abstractmethod
+    def write_file(self, path, text) -> dict:
+        """新建或覆盖文本文件。"""
+
+    @abstractmethod
+    def mkdir(self, path) -> dict:
+        """新建目录。"""
+
+    @abstractmethod
+    def rename(self, path, new_name) -> dict:
+        """同目录内重命名文件或目录。"""
+
+    @abstractmethod
+    def delete(self, path) -> dict:
+        """删除文件或空目录。"""
 
 
 # ---- 校验器 ----
@@ -204,4 +235,123 @@ def check_debug_stop(payload):
     _expect_dict(payload, "debug_stop")
     if not _expect_bool(payload, "ok"):
         _check_errors(payload, "debug_stop")
+    return payload
+
+
+# ---- 项目与文件读写 ----
+
+def _expect_ok(payload, what):
+    ok = _expect_bool(payload, "ok")
+    errors = payload.get("errors")
+    if not isinstance(errors, list) or not all(
+        isinstance(item, str) for item in errors
+    ):
+        _fail(f"{what}.errors 必须是字符串数组")
+    if not ok and not errors:
+        _fail(f"{what}: ok=false 时必须给出至少一条 errors")
+    return ok
+
+
+def _expect_rel_path(payload, key="path", allow_empty=True):
+    """项目内相对路径：不许绝对路径、不许 ..、按 / 分段。"""
+    value = payload.get(key)
+    if not isinstance(value, str):
+        _fail(f"{key} 必须是字符串")
+    if value.startswith(("/", "\\")) or (len(value) > 1 and value[1] == ":"):
+        _fail(f"{key} 必须是项目内相对路径：{value!r}")
+    if ".." in value.replace("\\", "/").split("/"):
+        _fail(f"{key} 不能包含 ..：{value!r}")
+    if not allow_empty and not value:
+        _fail(f"{key} 不能为空")
+    return value
+
+
+def check_project(payload):
+    _expect_dict(payload, "project")
+    _expect_ok(payload, "project")
+    if not isinstance(payload.get("root"), str) or not payload["root"]:
+        _fail("project.root 必须是非空字符串")
+    if not isinstance(payload.get("name"), str):
+        _fail("project.name 必须是字符串")
+    launcher = payload.get("launcher")
+    if launcher is not None and not isinstance(launcher, str):
+        _fail("project.launcher 必须是字符串或 null")
+
+    plugins = payload.get("plugins")
+    if not isinstance(plugins, dict):
+        _fail("project.plugins 必须是 dict")
+    for key in ("global", "project"):
+        count = plugins.get(key)
+        if not isinstance(count, int) or isinstance(count, bool) or count < 0:
+            _fail(f"project.plugins.{key} 必须是非负整数")
+
+    skipped = payload.get("skipped")
+    if not isinstance(skipped, list):
+        _fail("project.skipped 必须是数组")
+    for item in skipped:
+        _expect_dict(item, "project.skipped[]")
+        for key in ("file", "path", "reason"):
+            if not isinstance(item.get(key), str):
+                _fail(f"project.skipped[].{key} 必须是字符串")
+        if item.get("source") not in ("global", "project"):
+            _fail("project.skipped[].source 只能是 global 或 project")
+    return payload
+
+
+def check_tree(payload):
+    _expect_dict(payload, "tree")
+    if _expect_ok(payload, "tree"):
+        _expect_rel_path(payload, "path", allow_empty=True)
+        entries = payload.get("entries")
+        if not isinstance(entries, list):
+            _fail("tree.entries 必须是数组")
+        for entry in entries:
+            _expect_dict(entry, "tree.entries[]")
+            if not isinstance(entry.get("name"), str) or not entry["name"]:
+                _fail("tree.entries[].name 必须是非空字符串")
+            _expect_rel_path(entry, "path", allow_empty=False)
+            kind = entry.get("kind")
+            if kind not in ("file", "dir"):
+                _fail("tree.entries[].kind 只能是 file 或 dir")
+            if kind == "file":
+                size = entry.get("size")
+                if not isinstance(size, int) or isinstance(size, bool) or size < 0:
+                    _fail("tree.entries[].size 必须是非负整数")
+    return payload
+
+
+def check_file(payload):
+    _expect_dict(payload, "file")
+    if _expect_ok(payload, "file"):
+        _expect_rel_path(payload, "path", allow_empty=False)
+        kind = payload.get("kind")
+        if kind not in ("text", "binary", "too_large"):
+            _fail("file.kind 只能是 text / binary / too_large")
+        size = payload.get("size")
+        if not isinstance(size, int) or isinstance(size, bool) or size < 0:
+            _fail("file.size 必须是非负整数")
+        text = payload.get("text")
+        if kind == "text":
+            if not isinstance(text, str):
+                _fail("file.kind=text 时 text 必须是字符串")
+        elif text is not None:
+            _fail("file.kind 不是 text 时 text 必须是 null")
+    return payload
+
+
+def check_write_file(payload):
+    _expect_dict(payload, "write_file")
+    if _expect_ok(payload, "write_file"):
+        _expect_rel_path(payload, "path", allow_empty=False)
+        size = payload.get("size")
+        if not isinstance(size, int) or isinstance(size, bool) or size < 0:
+            _fail("write_file.size 必须是非负整数")
+    return payload
+
+
+def check_path_result(payload, what):
+    """mkdir / rename / delete 共用：成功时回操作后的相对路径。"""
+    _expect_dict(payload, what)
+    if _expect_ok(payload, what):
+        _expect_rel_path(payload, "path", allow_empty=False)
     return payload

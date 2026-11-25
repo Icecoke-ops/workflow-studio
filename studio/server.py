@@ -1,16 +1,25 @@
-"""本地 Web API：给 Vue 前端提供插件查询、校验和执行接口。
+"""本地 Web API：一个进程服务一个项目根。
 
-    python -m studio [--plugins-dir DIR ...] [-e KEY=VALUE ...] [--host 127.0.0.1] [--port 8765] [--allow-remote]
+    python -m studio --serve DIR [--port 0] [--port-file PATH] [--launcher URL] [-e KEY=VALUE ...]
 
-分层：:class:`EngineService` 只做业务（registry -> 契约载荷），
+只监听 127.0.0.1；插件 = 引擎自带的 plugins/ + 项目根下的 plugins/。
+启动后进程工作目录切到项目根，``/api/run`` 与调试子进程里的相对路径口径一致。
+分层：:class:`EngineService` 只做业务（registry / project -> 契约载荷），
 :class:`StudioHandler` 只做 HTTP 路由/序列化/静态文件。
 业务载荷形状由 :mod:`studio.contract` 的 ``check_*`` 强制。
 
 接口：
     GET  /api/health      引擎版本与插件/组件数量
     GET  /api/plugins     插件、类型、组件及端口 schema
+    GET  /api/project     项目根、启动参数与插件加载概况
+    GET  /api/tree        列项目内一层目录（?path=）
+    GET  /api/file        读项目内文本文件（?path=）
     POST /api/validate    校验工作流
     POST /api/run         校验并执行工作流
+    POST /api/file        写入文本文件 {path, text}
+    POST /api/mkdir       新建目录 {path}
+    POST /api/rename      同目录重命名 {path, new_name}
+    POST /api/delete      删除文件或空目录 {path}
     POST /api/debug/start 起调试子进程（WebSocket 由 hooks/http_debug 提供）
     POST /api/debug/stop  停止调试子进程
     GET  /                前端页面（studio/web/index.html）
@@ -18,7 +27,6 @@
 """
 
 import argparse
-import ipaddress
 import json
 import mimetypes
 import os
@@ -28,7 +36,7 @@ import traceback
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import unquote, urlsplit
+from urllib.parse import parse_qs, unquote, urlsplit
 
 from engine import __version__ as ENGINE_VERSION
 from engine import env as env_mod
@@ -46,12 +54,18 @@ from .contract import (
     ContractError,
     check_debug_start,
     check_debug_stop,
+    check_file,
     check_health,
+    check_path_result,
     check_plugins,
+    check_project,
     check_run,
+    check_tree,
     check_validate,
+    check_write_file,
 )
 from .debug import DebugManager, TEMP_DIR
+from .project import Project, ProjectError
 
 __all__ = ["EngineService", "StudioServer", "main"]
 
@@ -71,20 +85,27 @@ _HTML = "text/html; charset=utf-8"
 class EngineService(ApiService):
     """基于 engine 注册表的业务实现，不碰任何 HTTP 细节。"""
 
-    def __init__(self, registry, cli_env=None):
+    def __init__(
+        self, registry, cli_env=None, *, project, launcher=None, load_errors=()
+    ):
         self.registry = registry
         self.cli_env = dict(cli_env or {})
+        self._project = project
+        self.launcher = launcher
+        self.load_errors = list(load_errors)
 
     def health(self):
         registry = self.registry
         return {
             "ok": True,
             "engine": ENGINE_VERSION,
-            "plugins": len(registry.plugins),
-            "components": len(registry.components),
+            "plugins": len(registry.plugins) if registry else 0,
+            "components": len(registry.components) if registry else 0,
         }
 
     def plugins(self):
+        if self.registry is None:
+            return {"plugins": []}
         registry = self.registry
         plugins = []
         for info in registry.plugins.values():
@@ -108,9 +129,13 @@ class EngineService(ApiService):
         return {"plugins": plugins}
 
     def validate(self, workflow):
+        if self.registry is None:
+            return _failed(self.load_errors)
         return _report(validate(self.registry, workflow))
 
     def run(self, workflow):
+        if self.registry is None:
+            return {**_failed(self.load_errors), "nodes": []}
         with _RUN_LOCK:
             return self._run_locked(workflow)
 
@@ -153,6 +178,73 @@ class EngineService(ApiService):
         finally:
             env_mod.restore(state)
             path.unlink(missing_ok=True)
+
+    # -- 项目与文件 ------------------------------------------------------
+    def project(self):
+        plugins = {"global": 0, "project": 0}
+        skipped = []
+        if self.registry is None:
+            errors = list(self.load_errors)
+        else:
+            errors = []
+            plugin_dir = self._project.root / "plugins"
+            for info in self.registry.plugins.values():
+                source = _plugin_source(info, plugin_dir)
+                if source is not None:
+                    plugins[source] += 1
+            skipped = [
+                {**item, "source": _skipped_source(item, plugin_dir)}
+                for item in self.registry.skipped
+            ]
+        return check_project(
+            {
+                "ok": not errors,
+                "root": str(self._project.root),
+                "name": self._project.name,
+                "launcher": self.launcher,
+                "plugins": plugins,
+                "skipped": skipped,
+                "errors": errors,
+            }
+        )
+
+    def tree(self, path):
+        return check_tree(self._project.list_dir(path))
+
+    def read_file(self, path):
+        return check_file(self._project.read_text(path))
+
+    def write_file(self, path, text):
+        return check_write_file(self._project.write_text(path, text))
+
+    def mkdir(self, path):
+        return check_path_result(self._project.mkdir(path), "mkdir")
+
+    def rename(self, path, new_name):
+        return check_path_result(self._project.rename(path, new_name), "rename")
+
+    def delete(self, path):
+        return check_path_result(self._project.delete(path), "delete")
+
+
+def _failed(errors):
+    return {"ok": False, "errors": list(errors), "warnings": [], "order": []}
+
+
+def _plugin_source(info, plugin_dir):
+    """插件来自全局 plugins/ 还是项目 plugins/；内置 std 不是目录里的插件。"""
+    if info.source == "<builtin>":
+        return None
+    return "project" if _same_dir(Path(info.source).parent, plugin_dir) else "global"
+
+
+def _skipped_source(item, plugin_dir):
+    return "project" if _same_dir(Path(item["path"]).parent, plugin_dir) else "global"
+
+
+def _same_dir(left, right):
+    key = lambda path: os.path.normcase(str(Path(path).resolve()))  # noqa: E731
+    return key(left) == key(right)
 
 
 def _report(report):
@@ -247,12 +339,23 @@ class StudioHandler(BaseHTTPRequestHandler):
 
     # -- 路由 ------------------------------------------------------------
     def _handle_get(self):
-        path = urlsplit(self.path).path
+        url = urlsplit(self.path)
+        path = url.path
         service = self.server.service
         if path == "/api/health":
             self._send_json(HTTPStatus.OK, check_health(service.health()))
         elif path == "/api/plugins":
             self._send_json(HTTPStatus.OK, check_plugins(service.plugins()))
+        elif path == "/api/project":
+            self._send_json(HTTPStatus.OK, service.project())
+        elif path == "/api/tree":
+            self._send_json(HTTPStatus.OK, service.tree(_query_path(url, "")))
+        elif path == "/api/file":
+            rel = _query_path(url, None)
+            if rel is None:
+                self._bad_request("缺少 path 查询参数")
+                return
+            self._send_json(HTTPStatus.OK, service.read_file(rel))
         elif path == "/":
             self._serve_index()
         elif path.startswith("/static/"):
@@ -267,6 +370,10 @@ class StudioHandler(BaseHTTPRequestHandler):
             "/api/run",
             "/api/debug/start",
             "/api/debug/stop",
+            "/api/file",
+            "/api/mkdir",
+            "/api/rename",
+            "/api/delete",
         ):
             self._not_found(path)
             return
@@ -274,14 +381,46 @@ class StudioHandler(BaseHTTPRequestHandler):
         payload = self._read_json()
         if payload is None:
             return
+        service = self.server.service
+
+        if path == "/api/file":
+            rel = self._string_field(payload, "path")
+            if rel is None:
+                return
+            text = payload.get("text")
+            if not isinstance(text, str):
+                self._bad_request("请求体缺少 text 字符串")
+                return
+            self._send_json(HTTPStatus.OK, service.write_file(rel, text))
+            return
+
+        if path == "/api/mkdir":
+            rel = self._string_field(payload, "path")
+            if rel is None:
+                return
+            self._send_json(HTTPStatus.OK, service.mkdir(rel))
+            return
+
+        if path == "/api/rename":
+            rel = self._string_field(payload, "path")
+            if rel is None:
+                return
+            new_name = self._string_field(payload, "new_name")
+            if new_name is None:
+                return
+            self._send_json(HTTPStatus.OK, service.rename(rel, new_name))
+            return
+
+        if path == "/api/delete":
+            rel = self._string_field(payload, "path")
+            if rel is None:
+                return
+            self._send_json(HTTPStatus.OK, service.delete(rel))
+            return
 
         if path == "/api/debug/stop":
-            session = payload.get("session")
-            if not isinstance(session, str) or not session:
-                self._send_json(
-                    HTTPStatus.BAD_REQUEST,
-                    {"ok": False, "errors": ["请求体缺少 session 字符串"]},
-                )
+            session = self._string_field(payload, "session")
+            if session is None:
                 return
             self._send_json(
                 HTTPStatus.OK, check_debug_stop(self.server.debug.stop(session))
@@ -290,10 +429,7 @@ class StudioHandler(BaseHTTPRequestHandler):
 
         workflow = payload.get("workflow")
         if not isinstance(workflow, dict):
-            self._send_json(
-                HTTPStatus.BAD_REQUEST,
-                {"ok": False, "errors": ["请求体缺少 workflow 对象"]},
-            )
+            self._bad_request("请求体缺少 workflow 对象")
             return
 
         if path == "/api/debug/start":
@@ -302,7 +438,6 @@ class StudioHandler(BaseHTTPRequestHandler):
             )
             return
 
-        service = self.server.service
         if path == "/api/validate":
             self._send_json(HTTPStatus.OK, check_validate(service.validate(workflow)))
         else:
@@ -314,6 +449,13 @@ class StudioHandler(BaseHTTPRequestHandler):
             handler()
         except (BrokenPipeError, ConnectionResetError):
             pass
+        except ProjectError as exc:
+            try:
+                self._send_json(
+                    HTTPStatus.OK, {"ok": False, "errors": [str(exc)]}
+                )
+            except Exception:
+                pass
         except ContractError as exc:
             try:
                 self._send_json(
@@ -331,6 +473,16 @@ class StudioHandler(BaseHTTPRequestHandler):
                 )
             except Exception:
                 pass
+
+    def _bad_request(self, message):
+        self._send_json(HTTPStatus.BAD_REQUEST, {"ok": False, "errors": [message]})
+
+    def _string_field(self, payload, key):
+        value = payload.get(key)
+        if not isinstance(value, str) or not value:
+            self._bad_request(f"请求体缺少 {key} 字符串")
+            return None
+        return value
 
     def _send_json(self, status, payload):
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
@@ -409,13 +561,9 @@ class StudioHandler(BaseHTTPRequestHandler):
 
 # ---- 启动 ----
 
-def _is_loopback(host):
-    if host in ("localhost", "::1"):
-        return True
-    try:
-        return ipaddress.ip_address(host).is_loopback
-    except ValueError:
-        return False
+def _query_path(url, default):
+    values = parse_qs(url.query, keep_blank_values=True).get("path")
+    return default if values is None else values[0]
 
 
 def main(argv=None):
@@ -423,18 +571,25 @@ def main(argv=None):
         prog="studio", description=f"数据分析工作流本地 Web API v{__version__}"
     )
     parser.add_argument(
-        "-p",
-        "--plugins-dir",
-        action="append",
-        default=None,
-        help="额外插件 zip 目录，可重复指定（默认总会扫描引擎自带的 plugins/）",
+        "--serve",
+        required=True,
+        metavar="DIR",
+        help="项目根目录（一个进程只服务一个项目，只监听 127.0.0.1）",
     )
-    parser.add_argument("--host", default="127.0.0.1", help="监听地址（默认 127.0.0.1）")
-    parser.add_argument("--port", type=int, default=8765, help="监听端口（默认 8765）")
     parser.add_argument(
-        "--allow-remote",
-        action="store_true",
-        help="允许监听非回环地址（服务无认证，局域网内谁都能调用）",
+        "--port", type=int, default=0, help="监听端口（默认 0，随机分配）"
+    )
+    parser.add_argument(
+        "--port-file",
+        default=None,
+        metavar="PATH",
+        help="绑定成功后把实际端口写进该文件，退出时删掉",
+    )
+    parser.add_argument(
+        "--launcher",
+        default=None,
+        metavar="URL",
+        help="落地页地址（可选，原样回给前端）",
     )
     parser.add_argument(
         "-e",
@@ -446,68 +601,97 @@ def main(argv=None):
     )
     args = parser.parse_args(argv)
 
-    if not _is_loopback(args.host):
-        if not args.allow_remote:
-            print(
-                f"[拒绝启动] --host {args.host} 不是回环地址：服务没有认证，"
-                "局域网内任何人都能调用 API（含文件读写）。"
-                "确需远程访问请加 --allow-remote。",
-                file=sys.stderr,
-            )
-            return 1
-        print(
-            f"[警告] 已允许远程访问 {args.host}:{args.port}：服务没有认证，"
-            "局域网内任何人都能调用 API（含文件读写）。",
-            file=sys.stderr,
-        )
-
     try:
         cli_env = env_mod.parse_pairs(args.env or [])
     except ValueError as exc:
         print(f"[环境变量不合法] {exc}", file=sys.stderr)
         return 1
-    workspace = os.getcwd()
-    os.environ.update({"workspace": workspace, "engine_version": ENGINE_VERSION})
 
-    dirs = [DEFAULT_DIR] + (args.plugins_dir or [])
     try:
-        registry = Registry().load(*dirs)
-    except WorkflowError as exc:
-        print(f"[插件加载失败] {exc}", file=sys.stderr)
+        project = Project(args.serve)
+    except ProjectError as exc:
+        print(f"[项目不可用] {exc}", file=sys.stderr)
         return 1
+    # --port-file 相对启动目录：chdir 之前先定死绝对路径
+    port_file = Path(args.port_file).resolve() if args.port_file else None
+    # 进程 cwd 就是项目根：/api/run 与调试子进程里的相对路径落到同一个地方
+    try:
+        os.chdir(project.root)
+    except OSError as exc:
+        print(f"[项目不可用] 无法进入项目目录 {project.root}：{exc}", file=sys.stderr)
+        return 1
+    os.environ.update(
+        {"workspace": str(project.root), "engine_version": ENGINE_VERSION}
+    )
+
+    plugin_dir = project.root / "plugins"
+    dirs = [DEFAULT_DIR] + ([plugin_dir] if plugin_dir.is_dir() else [])
+    try:
+        registry = Registry().load(*dirs, strict=False)
+        load_errors = []
+    except WorkflowError as exc:
+        registry = None
+        load_errors = [str(exc)]
 
     passthrough = []
-    for directory in args.plugins_dir or []:
-        # 调试子进程 cwd 是仓库根：相对路径必须先按 Studio 启动目录解析成绝对路径
-        passthrough += [
-            "--plugins-dir",
-            os.path.normpath(os.path.join(workspace, directory)),
-        ]
+    if plugin_dir.is_dir():
+        passthrough += ["--plugins-dir", str(plugin_dir)]
     for pair in args.env or []:
         passthrough += ["-e", pair]
-    debug = DebugManager(extra_args=passthrough, workspace=workspace)
+    debug = DebugManager(extra_args=passthrough, workspace=str(project.root))
 
     try:
         server = StudioServer(
-            (args.host, args.port), EngineService(registry, cli_env), debug=debug
+            ("127.0.0.1", args.port),
+            EngineService(
+                registry,
+                cli_env,
+                project=project,
+                launcher=args.launcher,
+                load_errors=load_errors,
+            ),
+            debug=debug,
         )
     except OSError as exc:
-        print(f"[启动失败] 无法监听 {args.host}:{args.port}：{exc}", file=sys.stderr)
+        print(f"[启动失败] 无法监听 127.0.0.1:{args.port}：{exc}", file=sys.stderr)
         return 1
 
-    host, port = server.server_address[:2]
+    _, port = server.server_address[:2]
+    if port_file is not None:
+        try:
+            port_file.write_text(f"{port}\n", encoding="utf-8")
+        except OSError as exc:
+            print(f"[端口文件写入失败] {port_file}：{exc}", file=sys.stderr)
+            server.server_close()
+            try:
+                port_file.unlink(missing_ok=True)
+            except OSError:
+                pass
+            return 1
+
+    if registry is None:
+        print(f"[studio] 插件加载失败：{load_errors[0]}", file=sys.stderr, flush=True)
+    else:
+        print(
+            f"[studio] 引擎 v{ENGINE_VERSION}，"
+            f"{len(registry.plugins)} 个插件 / {len(registry.components)} 个组件",
+            flush=True,
+        )
     print(
-        f"[studio] 引擎 v{ENGINE_VERSION}，"
-        f"{len(registry.plugins)} 个插件 / {len(registry.components)} 个组件",
+        f"[studio] 项目 {project.root} → http://127.0.0.1:{port}/ （Ctrl+C 停止）",
         flush=True,
     )
-    print(f"[studio] 监听 http://{host}:{port}/ （Ctrl+C 停止）", flush=True)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
         pass
     finally:
         server.server_close()
+        if port_file is not None:
+            try:
+                port_file.unlink(missing_ok=True)
+            except OSError:
+                pass
     print("[studio] 已停止")
     return 0
 

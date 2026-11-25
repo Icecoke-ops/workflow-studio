@@ -35,8 +35,9 @@ class DebugManager:
     def __init__(self, extra_args=(), hook_dir=None, workspace=None):
         self.extra_args = list(extra_args)
         self.hook_dir = Path(hook_dir) if hook_dir else ROOT / "hooks" / "http_debug"
-        # 子进程 cwd 是仓库根，必须用 -e workspace 显式对齐 Studio 的启动目录
-        self.workspace = str(workspace or os.getcwd())
+        # 子进程 cwd 是项目根：工作流里的相对路径落在项目里。
+        # 仓库根经 PYTHONPATH 传进去——cwd 不再是仓库根，否则 import 不到 engine。
+        self.workspace = str(Path(workspace or os.getcwd()).resolve())
         self._lock = threading.Lock()
         self._session = None
         self._closed = False
@@ -81,10 +82,15 @@ class DebugManager:
                 str(path),
             ]
             flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
+            env = dict(os.environ)
+            env["PYTHONPATH"] = os.pathsep.join(
+                part for part in (str(ROOT), env.get("PYTHONPATH", "")) if part
+            )
             try:
                 process = subprocess.Popen(
                     command,
-                    cwd=str(ROOT),
+                    cwd=self.workspace,
+                    env=env,
                     stdin=subprocess.DEVNULL,
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.PIPE,

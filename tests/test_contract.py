@@ -21,6 +21,7 @@ from studio.contract import (
     check_run,
     check_validate,
 )
+from studio.project import Project
 from studio.server import EngineService
 
 from _harness import check, expect_raises, run_cases, write_demo_data
@@ -219,7 +220,7 @@ def case_real_service_payloads():
     # ${workspace}/data.csv 读数据、n7 往那里写文件，所以用临时目录顶替。
     with tempfile.TemporaryDirectory(prefix="engine_contract_test_") as tmp:
         write_demo_data(tmp)
-        service = EngineService(registry, {"workspace": tmp})
+        service = EngineService(registry, {"workspace": tmp}, project=Project(tmp))
 
         health = service.health()
         check(check_health(health) == health, f"health 响应未通过契约：{health}")

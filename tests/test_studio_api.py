@@ -19,6 +19,7 @@ import tempfile
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 import zipfile
 from pathlib import Path
@@ -27,6 +28,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from engine import __version__ as ENGINE_VERSION  # noqa: E402
+from engine.loader import DEFAULT_DIR  # noqa: E402
 from engine.registry import Registry  # noqa: E402
 from studio import debug as debug_module  # noqa: E402
 from studio import server as server_module  # noqa: E402
@@ -40,8 +42,8 @@ from studio.contract import (  # noqa: E402
     check_validate,
 )
 from studio.debug import DebugManager  # noqa: E402
+from studio.project import Project  # noqa: E402
 from studio.server import EngineService, StudioServer  # noqa: E402
-from tools.build_plugins import build_all  # noqa: E402
 from websockets.sync.client import connect as ws_connect  # noqa: E402
 
 DEMO = ROOT / "workflows" / "regression_demo.json"
@@ -197,6 +199,43 @@ class Api:
         return status, content_type, json.loads(body)
 
 
+def start_studio(project_dir, *, extra_args=(), cwd=None, env=None):
+    """起一个真实项目服务并等到 health 就绪。"""
+    port = free_port()
+    process = subprocess.Popen(
+        [
+            sys.executable,
+            "-m",
+            "studio",
+            "--serve",
+            str(project_dir),
+            "--port",
+            str(port),
+            *extra_args,
+        ],
+        cwd=str(cwd or ROOT),
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        env=env,
+    )
+    health = wait_health(f"http://127.0.0.1:{port}", timeout=15)
+    check(
+        health is not None,
+        f"Studio 项目 {Path(project_dir).name} 启动成功（端口 {port}）",
+    )
+    return process, Api(f"http://127.0.0.1:{port}"), port
+
+
+def stop_studio(process):
+    process.terminate()
+    try:
+        process.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait(timeout=10)
+
+
 def main():
     temp = Path(tempfile.mkdtemp(prefix="studio_api_"))
     workspace = temp / "workspace"
@@ -212,11 +251,9 @@ def main():
     server = None
     thread = None
     try:
-        built = build_all(temp / "plugins")
-        check(len(built) == 5, f"打包出 {len(built)} 个插件")
-        registry = Registry().load(temp / "plugins")
+        registry = Registry().load(DEFAULT_DIR, strict=False)
 
-        service = EngineService(registry)
+        service = EngineService(registry, project=Project(workspace))
         check(isinstance(service, ApiService), "服务实例是 ApiService 的子类")
 
         web = temp / "web"
@@ -509,17 +546,25 @@ def main():
             f"非法 JSON 请求体 {body}",
         )
 
-        # 12) 真实启动：python -m studio 走 main()，能起服务、health 正常
+        # 12) 真实启动：python -m studio --serve 走 main()，能起服务、health 正常
         port = free_port()
         process = subprocess.Popen(
-            [sys.executable, "-m", "studio", "--port", str(port)],
+            [
+                sys.executable,
+                "-m",
+                "studio",
+                "--serve",
+                str(workspace),
+                "--port",
+                str(port),
+            ],
             cwd=str(ROOT),
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
         try:
             health = wait_health(f"http://127.0.0.1:{port}", timeout=10)
-            check(health is not None, f"python -m studio --port {port} 启动成功")
+            check(health is not None, f"python -m studio --serve --port {port} 启动成功")
             check(
                 health["ok"] is True and health["plugins"] >= 1,
                 f"真实进程健康检查 {health}",
@@ -545,20 +590,7 @@ def main():
                 time.sleep(0.1)
         check(released, f"端口 {port} 已释放")
 
-        # 13) 安全：非回环 host 没有 --allow-remote 时拒绝启动
-        result = subprocess.run(
-            [sys.executable, "-m", "studio", "--host", "0.0.0.0", "--port", str(free_port())],
-            cwd=str(ROOT),
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            timeout=15,
-        )
-        check(
-            result.returncode != 0,
-            f"0.0.0.0 缺 --allow-remote 启动失败（exit {result.returncode}）",
-        )
-
-        # 14) 安全：内部异常不把本机路径/异常原文回给客户端
+        # 13) 安全：内部异常不把本机路径/异常原文回给客户端
         original_health = service.health
 
         def boom():
@@ -754,11 +786,12 @@ def main():
             "崩溃后无调试临时文件残留",
         )
 
-        # 22) 真实 Studio 进程把 --plugins-dir / -e 透传给调试子进程
+        # 22) 真实 Studio 进程把项目 plugins/ 与 -e 透传给调试子进程
         probe_src = temp / "probe_src"
-        probe_plugins = temp / "probe_plugins"
+        probe_project = temp / "probe_project"
+        probe_plugins = probe_project / "plugins"
         probe_src.mkdir()
-        probe_plugins.mkdir()
+        probe_plugins.mkdir(parents=True)
         (probe_src / "__init__.py").write_text("", encoding="utf-8")
         (probe_src / "components.py").write_text(
             "import os\n\n"
@@ -769,7 +802,7 @@ def main():
             "class Probe(Component):\n"
             "    name = 'Probe'\n"
             "    title = '透传探针'\n"
-            "    desc = '验证 --plugins-dir 与 -e 透传'\n\n"
+            "    desc = '验证项目 plugins 与 -e 透传'\n\n"
             "    @staticmethod\n"
             "    def config_schema():\n"
             "        return {}\n\n"
@@ -800,10 +833,10 @@ def main():
                 sys.executable,
                 "-m",
                 "studio",
+                "--serve",
+                str(probe_project),
                 "--port",
                 str(probe_port),
-                "--plugins-dir",
-                str(probe_plugins),
                 "-e",
                 "PROBE_FLAG=yes",
             ],
@@ -855,7 +888,15 @@ def main():
         if os.name == "nt":
             doomed_port = free_port()
             doomed = subprocess.Popen(
-                [sys.executable, "-m", "studio", "--port", str(doomed_port)],
+                [
+                    sys.executable,
+                    "-m",
+                    "studio",
+                    "--serve",
+                    str(workspace),
+                    "--port",
+                    str(doomed_port),
+                ],
                 cwd=str(ROOT),
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
@@ -898,7 +939,15 @@ def main():
         # 24) 同端口起第二个 Studio：非 0 退出，stderr 说明无法监听
         holder_port = free_port()
         holder = subprocess.Popen(
-            [sys.executable, "-m", "studio", "--port", str(holder_port)],
+            [
+                sys.executable,
+                "-m",
+                "studio",
+                "--serve",
+                str(workspace),
+                "--port",
+                str(holder_port),
+            ],
             cwd=str(ROOT),
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
@@ -912,7 +961,15 @@ def main():
             err_path = temp / "dup.err"
             with err_path.open("wb") as err_file:
                 duplicate = subprocess.run(
-                    [sys.executable, "-m", "studio", "--port", str(holder_port)],
+                    [
+                        sys.executable,
+                        "-m",
+                        "studio",
+                        "--serve",
+                        str(workspace),
+                        "--port",
+                        str(holder_port),
+                    ],
                     cwd=str(ROOT),
                     stdin=subprocess.DEVNULL,
                     stdout=subprocess.DEVNULL,
@@ -947,12 +1004,14 @@ def main():
         check(check_debug_start(refused) == refused, "拒绝响应通过 check_debug_start")
         check(after == before, "被拒绝的 start 不写临时文件")
 
-        # 26) Studio 不在仓库根启动：${workspace} 与相对 --plugins-dir 都按启动目录走
-        startup = temp / "startup"
-        rel_plugins = startup / "rel_plugins"
+        # 26) 项目根由 --serve 决定：从别处启动也按项目根解析 ${workspace} 与 plugins/
+        project_root = temp / "startup_project"
+        rel_plugins = project_root / "plugins"
         rel_plugins.mkdir(parents=True)
+        elsewhere = temp / "elsewhere"
+        elsewhere.mkdir()
         marker = "REL-WORKSPACE-MARKER-7f3a"
-        (startup / "rel_marker.txt").write_text(marker + "\n", encoding="utf-8")
+        (project_root / "rel_marker.txt").write_text(marker + "\n", encoding="utf-8")
         relprobe_src = temp / "relprobe_src"
         relprobe_src.mkdir()
         (relprobe_src / "__init__.py").write_text("", encoding="utf-8")
@@ -1010,12 +1069,12 @@ def main():
                 sys.executable,
                 "-m",
                 "studio",
+                "--serve",
+                str(project_root),
                 "--port",
                 str(rel_port),
-                "--plugins-dir",
-                "rel_plugins",
             ],
-            cwd=str(startup),
+            cwd=str(elsewhere),
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
@@ -1075,6 +1134,402 @@ def main():
                 rel_studio.kill()
                 rel_studio.wait()
         check(rel_studio.returncode is not None, "启动目录 Studio 已退出")
+
+        # 27) 项目形状：root / name / launcher / 插件计数 / skipped / errors
+        status, _, body = api.json("/api/project")
+        check(status == 200, "GET /api/project 返回 200")
+        check(
+            body["ok"] is True
+            and body["root"] == str(workspace.resolve())
+            and body["name"] == "workspace"
+            and body["launcher"] is None,
+            f"project 形状 {body}",
+        )
+        check(
+            body["plugins"] == {"global": 5, "project": 0}
+            and body["skipped"] == []
+            and body["errors"] == [],
+            f"project 插件概况 {body['plugins']} / skipped={body['skipped']}",
+        )
+
+        # 28) tree：目录在前、文件带 size、目录不带
+        (workspace / "subdir").mkdir(exist_ok=True)
+        note_text = "你好，项目\n第二行"
+        note_bytes = note_text.encode("utf-8")
+        status, _, body = api.json(
+            "/api/file", {"path": "note.txt", "text": note_text}
+        )
+        check(
+            status == 200 and body["ok"] is True and body["size"] == len(note_bytes),
+            f"写文件 size 按字节 {body}",
+        )
+        check(
+            (workspace / "note.txt").read_bytes() == note_bytes,
+            "盘上字节与写入一致",
+        )
+        status, _, body = api.json("/api/file?path=note.txt")
+        check(
+            status == 200
+            and body["ok"] is True
+            and body["kind"] == "text"
+            and body["text"] == note_text
+            and body["size"] == len(note_bytes),
+            f"读文件往返 {body['kind']} / {body['size']}",
+        )
+
+        status, _, body = api.json("/api/tree?path=")
+        entries = body["entries"]
+        kinds = [entry["kind"] for entry in entries]
+        check(
+            status == 200
+            and body["ok"] is True
+            and kinds == sorted(kinds, key=lambda kind: kind != "dir"),
+            f"tree 目录在前：{[(e['name'], e['kind']) for e in entries]}",
+        )
+        dir_entry = next(e for e in entries if e["name"] == "subdir")
+        file_entry = next(e for e in entries if e["name"] == "note.txt")
+        check(dir_entry["kind"] == "dir" and "size" not in dir_entry, "目录条目不带 size")
+        check(
+            file_entry["kind"] == "file" and file_entry["size"] == len(note_bytes),
+            f"文件条目带 size：{file_entry}",
+        )
+        status, _, body = api.json("/api/tree?path=subdir")
+        check(
+            status == 200 and body["ok"] is True and body["entries"] == [],
+            "空目录 tree 为空",
+        )
+
+        # 29) 路径越界一律拒绝，项目外不落文件
+        outside = temp / "outside.txt"
+        outside.write_text("SECRET-OUTSIDE", encoding="utf-8")
+        for rel in (
+            "../outside.txt",
+            str(outside),
+            "C:\\x",
+            "\\\\server\\share\\x",
+            "..\\outside.txt",
+        ):
+            status, _, body = api.json(
+                "/api/file?path=" + urllib.parse.quote(rel, safe="")
+            )
+            check(
+                status == 200 and body["ok"] is False and bool(body["errors"]),
+                f"越界读被拒 {rel!r}：{body.get('errors')}",
+            )
+        status, _, body = api.json(
+            "/api/file", {"path": "../outside_write.txt", "text": "x"}
+        )
+        check(
+            status == 200 and body["ok"] is False,
+            f"越界写被拒：{body.get('errors')}",
+        )
+        check(
+            not (temp / "outside_write.txt").exists(),
+            "越界写不能在项目外落文件",
+        )
+        # 链接逃逸：_rel_parts 挡不住，必须靠 resolve 后的根内判定
+        link = workspace / "escape_link"
+        if os.name == "nt":
+            made = subprocess.run(
+                ["cmd", "/c", "mklink", "/J", str(link), str(temp)],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            check(made.returncode == 0, "应为越界用例创建 junction")
+        else:
+            os.symlink(temp, link, target_is_directory=True)
+        status, _, body = api.json(
+            "/api/file?path=" + urllib.parse.quote("escape_link/outside.txt", safe="")
+        )
+        check(
+            status == 200 and body["ok"] is False,
+            f"链接越界读被拒：{body.get('errors')}",
+        )
+        status, _, body = api.json(
+            "/api/file",
+            {"path": "escape_link/outside_write.txt", "text": "x"},
+        )
+        check(
+            status == 200 and body["ok"] is False,
+            f"链接越界写被拒：{body.get('errors')}",
+        )
+        check(
+            not (temp / "outside_write.txt").exists(),
+            "链接越界写不能在项目外落文件",
+        )
+        if os.name == "nt":
+            os.rmdir(link)
+        else:
+            link.unlink()
+        status, _, body = api.json("/api/file?path=missing.txt")
+        check(
+            status == 200 and body["ok"] is False and bool(body["errors"]),
+            f"缺失文件 ok:false：{body}",
+        )
+
+        # 30) 二进制与 >1 MiB
+        (workspace / "bin.dat").write_bytes(b"\x00\x01\x02\xff")
+        status, _, body = api.json("/api/file?path=bin.dat")
+        check(
+            status == 200 and body["kind"] == "binary" and body["text"] is None,
+            f"二进制判 binary：{body}",
+        )
+        big = "a" * (1024 * 1024 + 1)
+        (workspace / "big.txt").write_text(big, encoding="utf-8")
+        status, _, body = api.json("/api/file?path=big.txt")
+        check(
+            status == 200
+            and body["kind"] == "too_large"
+            and body["text"] is None
+            and body["size"] == len(big),
+            f">1MiB 判 too_large：{body['kind']} / {body['size']}",
+        )
+
+        # 31) mkdir / rename / delete 成功与失败路径
+        status, _, body = api.json("/api/mkdir", {"path": "newdir"})
+        check(
+            status == 200 and body["ok"] is True and (workspace / "newdir").is_dir(),
+            f"mkdir 成功：{body}",
+        )
+        status, _, body = api.json("/api/mkdir", {"path": "newdir"})
+        check(
+            status == 200 and body["ok"] is False,
+            f"mkdir 已存在 ok:false：{body.get('errors')}",
+        )
+
+        (workspace / "newdir" / "a.txt").write_text("a", encoding="utf-8")
+        status, _, body = api.json(
+            "/api/rename", {"path": "newdir/a.txt", "new_name": "b.txt"}
+        )
+        check(
+            status == 200
+            and body["ok"] is True
+            and body["path"] == "newdir/b.txt"
+            and (workspace / "newdir" / "b.txt").is_file()
+            and not (workspace / "newdir" / "a.txt").exists(),
+            f"rename 成功：{body}",
+        )
+        (workspace / "newdir" / "c.txt").write_text("c", encoding="utf-8")
+        status, _, body = api.json(
+            "/api/rename", {"path": "newdir/c.txt", "new_name": "b.txt"}
+        )
+        check(
+            status == 200 and body["ok"] is False,
+            f"rename 撞已有名 ok:false：{body.get('errors')}",
+        )
+        status, _, body = api.json(
+            "/api/rename", {"path": "newdir/c.txt", "new_name": "sub/x"}
+        )
+        check(
+            status == 200 and body["ok"] is False,
+            f"rename 新名带分隔符被拒：{body.get('errors')}",
+        )
+
+        status, _, body = api.json("/api/delete", {"path": "newdir"})
+        check(
+            status == 200 and body["ok"] is False,
+            f"delete 非空目录 ok:false：{body.get('errors')}",
+        )
+        status, _, body = api.json("/api/delete", {"path": "newdir/b.txt"})
+        check(status == 200 and body["ok"] is True, f"delete 文件成功：{body}")
+        status, _, body = api.json("/api/delete", {"path": "newdir/c.txt"})
+        check(status == 200 and body["ok"] is True, f"delete 遗留文件成功：{body}")
+        status, _, body = api.json("/api/delete", {"path": "newdir"})
+        check(status == 200 and body["ok"] is True, f"delete 空目录成功：{body}")
+        status, _, body = api.json("/api/delete", {"path": "."})
+        check(
+            status == 200 and body["ok"] is False,
+            f"delete 根被拒：{body.get('errors')}",
+        )
+
+        # 32) 项目 plugins 里的非插件 zip：skipped 一条、source=project、ok:true
+        skipped_project = temp / "skipped_project"
+        (skipped_project / "plugins").mkdir(parents=True)
+        with zipfile.ZipFile(
+            skipped_project / "plugins" / "not_a_plugin.zip", "w"
+        ) as archive:
+            archive.writestr("readme.txt", "not a plugin")
+        skipped_studio = None
+        try:
+            skipped_studio, skipped_api, _ = start_studio(skipped_project)
+            status, _, body = skipped_api.json("/api/project")
+            check(
+                status == 200
+                and body["ok"] is True
+                and len(body["skipped"]) == 1
+                and body["skipped"][0]["file"] == "not_a_plugin.zip"
+                and body["skipped"][0]["source"] == "project",
+                f"项目 plugins 里的坏 zip 进 skipped：{body['skipped']}",
+            )
+            status, _, health_body = skipped_api.json("/api/health")
+            check(
+                health_body["plugins"] == 6,
+                f"跳过坏 zip 后仍有 6 个插件：{health_body}",
+            )
+        finally:
+            if skipped_studio is not None:
+                stop_studio(skipped_studio)
+
+        # 33) 与全局插件同名：project() ok:false、计数 0，文件接口照常
+        conflict_project = temp / "conflict_project"
+        (conflict_project / "plugins").mkdir(parents=True)
+        shutil.copyfile(
+            DEFAULT_DIR / "core.zip", conflict_project / "plugins" / "core.zip"
+        )
+        conflict_studio = None
+        try:
+            conflict_studio, conflict_api, _ = start_studio(conflict_project)
+            status, _, health_body = conflict_api.json("/api/health")
+            check(
+                health_body["plugins"] == 0 and health_body["components"] == 0,
+                f"冲突时 health 计数为 0：{health_body}",
+            )
+            status, _, body = conflict_api.json("/api/project")
+            joined = " | ".join(body["errors"])
+            check(
+                status == 200 and body["ok"] is False,
+                f"冲突时 project ok:false：{joined}",
+            )
+            check("插件名重复" in joined, f"错误含插件名重复：{joined}")
+            check(
+                str((DEFAULT_DIR / "core.zip").resolve()) in joined
+                and str((conflict_project / "plugins" / "core.zip").resolve())
+                in joined,
+                f"错误含两个绝对路径：{joined}",
+            )
+            status, _, body = conflict_api.json("/api/validate", {"workflow": raw})
+            check(status == 200 and body["ok"] is False, "冲突时 validate 回 ok:false")
+            status, _, body = conflict_api.json("/api/tree?path=")
+            check(status == 200 and body["ok"] is True, "冲突时文件接口照常")
+            status, _, body = conflict_api.json(
+                "/api/file", {"path": "still_works.txt", "text": "ok"}
+            )
+            check(
+                body["ok"] is True
+                and (conflict_project / "still_works.txt").is_file(),
+                "冲突时写文件照常",
+            )
+        finally:
+            if conflict_studio is not None:
+                stop_studio(conflict_studio)
+
+        # 34) cwd 就是项目根：相对路径读写都落在项目里，仓库根不出现输出
+        cwd_project = temp / "cwd_project"
+        cwd_project.mkdir()
+        (cwd_project / "data.csv").write_text("x,y\n0,1\n1,3\n", encoding="utf-8")
+        out_name = "STUDIO_CWD_OUT.csv"
+        check(not (ROOT / out_name).exists(), f"仓库根不应预先存在 {out_name}")
+        cwd_workflow = {
+            "name": "cwd",
+            "nodes": [
+                {
+                    "id": "n1",
+                    "plugin": "fileio",
+                    "component": "LoadCSV",
+                    "config": {"path": "data.csv"},
+                    "inputs": {},
+                },
+                {
+                    "id": "n2",
+                    "plugin": "fileio",
+                    "component": "SaveCSV",
+                    "config": {"path": out_name},
+                    "inputs": {"data": {"from": "n1", "port": "table"}},
+                },
+            ],
+        }
+        cwd_studio = None
+        try:
+            cwd_studio, cwd_api, _ = start_studio(cwd_project, cwd=ROOT)
+            status, _, body = cwd_api.json("/api/run", {"workflow": cwd_workflow})
+            check(
+                status == 200 and body["ok"] is True,
+                f"相对路径工作流成功：{body.get('errors')}",
+            )
+            check(
+                (cwd_project / out_name).is_file(),
+                "SaveCSV 相对路径落在项目根",
+            )
+            check(
+                not (ROOT / out_name).exists(),
+                "仓库根不应出现输出文件",
+            )
+        finally:
+            if cwd_studio is not None:
+                stop_studio(cwd_studio)
+            (ROOT / out_name).unlink(missing_ok=True)
+
+        # 35) --port-file：端口能连；正常退出后端口文件被删
+        port_project = temp / "port_project"
+        port_project.mkdir()
+        port_file = temp / "studio.port"
+        wrapper = temp / "studio_stop_after_start.py"
+        wrapper.write_text(
+            "import sys, threading\n"
+            "import studio.server as server\n"
+            "original = server.StudioServer.serve_forever\n"
+            "def serve_forever(self):\n"
+            "    threading.Timer(2.0, self.shutdown).start()\n"
+            "    return original(self)\n"
+            "server.StudioServer.serve_forever = serve_forever\n"
+            "sys.exit(server.main(sys.argv[1:]))\n",
+            encoding="utf-8",
+        )
+        wrapper_env = dict(os.environ, PYTHONPATH=str(ROOT))
+        wrapper_env.pop("workspace", None)
+        wrap = subprocess.Popen(
+            [
+                sys.executable,
+                str(wrapper),
+                "--serve",
+                str(port_project),
+                "--port",
+                "0",
+                "--port-file",
+                str(port_file),
+            ],
+            cwd=str(ROOT),
+            env=wrapper_env,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        try:
+            deadline = time.monotonic() + 10
+            while not port_file.is_file() and time.monotonic() < deadline:
+                time.sleep(0.05)
+            check(port_file.is_file(), "--port-file 已写出")
+            port_from_file = int(port_file.read_text(encoding="utf-8").strip())
+            check(port_open(port_from_file), f"端口文件里的端口 {port_from_file} 可连")
+            check(
+                wait_health(f"http://127.0.0.1:{port_from_file}", timeout=10)
+                is not None,
+                "端口文件里的服务 health 正常",
+            )
+            wrap.wait(timeout=20)
+        finally:
+            if wrap.poll() is None:
+                wrap.kill()
+                wrap.wait(timeout=10)
+        check(wrap.returncode == 0, f"进程正常退出（exit {wrap.returncode}）")
+        check(not port_file.exists(), "正常退出后端口文件已删除")
+
+        # 36) 不带 --serve：exit 1，并提示用 --serve
+        no_serve_err = temp / "no_serve.err"
+        with no_serve_err.open("wb") as err_file:
+            no_serve = subprocess.run(
+                [sys.executable, "-m", "studio", "--port", "0"],
+                cwd=str(ROOT),
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=err_file,
+                env=dict(os.environ, PYTHONIOENCODING="utf-8"),
+                timeout=15,
+            )
+        err_text = no_serve_err.read_text(encoding="utf-8", errors="replace")
+        check(no_serve.returncode == 1, f"不带 --serve 退出码 1（实际 {no_serve.returncode}）")
+        check("--serve" in err_text, f"stderr 提示用 --serve：{err_text.strip()}")
 
         print("\nALL OK")
         return 0
