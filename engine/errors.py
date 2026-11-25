@@ -9,6 +9,10 @@ class PluginLoadError(WorkflowError):
     """插件 zip 加载失败。"""
 
 
+class PluginNameConflict(PluginLoadError):
+    """插件名重复（全局与项目之间、或同批目录之间）。宽容模式也必须抛出。"""
+
+
 class SchemaError(WorkflowError):
     """插件声明的 schema 本身不合法。"""
 

@@ -13,14 +13,16 @@ from pathlib import Path
 from . import schema as schema_mod
 from . import stdtypes
 from .api import Component
-from .errors import PluginLoadError, SchemaError, WorkflowError
+from .errors import PluginLoadError, PluginNameConflict, SchemaError, WorkflowError
 from .loader import (
     PluginInfo,
     _is_importable_top_level,
     _package_name,
+    _purge_modules,
     add_all_to_sys_path,
     find_zips,
     load_plugin,
+    unmount_plugin,
     unmount_plugins,
 )
 from .typeid import qualify, resolve
@@ -48,10 +50,17 @@ class Registry:
         self.components = {}
         self.types = {}
         self.models = {}  # 类型标识 -> 必须继承的抽象基类
+        self.skipped = []  # 宽容模式跳过 / 未加载的 zip，按扫描顺序
 
     # -- 加载 ------------------------------------------------------------
-    def load(self, *plugins_dirs):
+    def load(self, *plugins_dirs, strict=True):
+        """加载插件目录；``strict=False`` 跳过坏 zip 并记进 ``self.skipped``。
+
+        宽容模式只跳过「这个 zip 不是插件 / 加载不进去」；同名冲突与
+        schema 不合法仍然是硬错误（那是真 bug，跳过等于静默降级）。
+        """
         self._register_std()
+        self.skipped = []
         unmount_plugins()
         zip_paths = []
         seen = set()
@@ -62,19 +71,43 @@ class Registry:
                     continue
                 seen.add(absolute)
                 zip_paths.append(zip_path)
+
+        candidates = []
         for zip_path in zip_paths:
-            package = _package_name(zip_path)
+            try:
+                package = _package_name(zip_path)
+            except PluginLoadError as exc:
+                if strict:
+                    raise
+                self._skip(zip_path, exc)
+                continue
             # 内置模块的 import 虽然顶不掉，但必须在 _purge_modules 之前拦住：
             # 否则 sys.modules 里的真模块会先被删掉、再重建成残骸（sys 尤其致命）。
             if package in sys.stdlib_module_names or _is_importable_top_level(package):
-                raise PluginLoadError(
+                message = (
                     f"{zip_path.name}: 插件名 {package!r} 与已安装的模块/标准库同名，"
                     f"会顶掉对它的 import，请换一个名字"
                 )
-        add_all_to_sys_path(zip_paths)
+                if strict:
+                    raise PluginLoadError(message)
+                self._skip(zip_path, message)
+                continue
+            candidates.append((zip_path, package))
+
+        add_all_to_sys_path([zip_path for zip_path, _ in candidates])
         infos = []
-        for zip_path in zip_paths:
-            info = load_plugin(zip_path, self.plugins)
+        for zip_path, package in candidates:
+            try:
+                info = load_plugin(zip_path, self.plugins)
+            except PluginNameConflict:
+                raise
+            except PluginLoadError as exc:
+                if strict:
+                    raise
+                self._skip(zip_path, exc)
+                unmount_plugin(zip_path)
+                _purge_modules(package)
+                continue
             self.plugins[info.name] = info
             infos.append(info)
             for short, desc in info.types.items():
@@ -82,6 +115,15 @@ class Registry:
         for info in infos:
             self._register(info)
         return self
+
+    def _skip(self, zip_path, reason):
+        self.skipped.append(
+            {
+                "file": Path(zip_path).name,
+                "path": str(Path(zip_path).resolve()),
+                "reason": str(reason),
+            }
+        )
 
     def _register_std(self):
         """标准类型永远在，不依赖任何插件。"""

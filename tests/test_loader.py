@@ -5,6 +5,7 @@
 直接运行：python tests/test_loader.py
 """
 
+import importlib
 import io
 import sys
 import tempfile
@@ -16,7 +17,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from engine.api import PredictorModel
-from engine.errors import PluginLoadError, SchemaError
+from engine.errors import PluginLoadError, PluginNameConflict, SchemaError
 from engine.loader import find_zips, load_plugin
 from engine.registry import Registry
 from engine.workflow import validate
@@ -895,6 +896,161 @@ def case_port_level_error_paths():
         )
 
 
+def case_tolerant_skips_non_plugin_zip():
+    """宽容模式：坏 zip 记进 skipped，其余插件照常加载。"""
+    with tempfile.TemporaryDirectory(prefix="engine_loader_test_") as tmp:
+        write_zip(tmp, "ldp40.zip", plugin_files("ldp40"))
+        bad = write_zip(tmp, "zz_not_plugin.zip", {"readme.txt": "不是插件"})
+        registry = Registry().load(tmp, strict=False)
+        check(registry.get_component("ldp40", "Thing") is not None, "合法插件应加载")
+        check(len(registry.skipped) == 1, f"应恰好跳过一条：{registry.skipped}")
+        entry = registry.skipped[0]
+        check(
+            sorted(entry) == ["file", "path", "reason"],
+            f"skipped 形状应为 file/path/reason：{entry}",
+        )
+        check(entry["file"] == "zz_not_plugin.zip", f"file 不对：{entry['file']!r}")
+        check(
+            entry["path"] == str(bad.resolve()),
+            f"path 应是绝对路径：{entry['path']!r} != {str(bad.resolve())!r}",
+        )
+        check(
+            isinstance(entry["reason"], str) and entry["reason"],
+            f"reason 必须非空：{entry['reason']!r}",
+        )
+        check(
+            "顶层必须恰好一个插件目录" in entry["reason"],
+            f"reason 应是真实错误：{entry['reason']!r}",
+        )
+
+
+def case_tolerant_failed_zip_unmounted_and_purged():
+    """宽容模式：先挂载再失败的 zip 要摘下 sys.path，并清掉 sys.modules 残留。"""
+    source = (
+        "from engine.api import Component\n\n"
+        'PLUGIN_VERSION = "1.0"\n\n\n'
+        "class Thing(Component):\n"
+        '    name = "Thing"\n\n\n'
+        "COMPONENTS = [Thing]\n"
+    )
+    with tempfile.TemporaryDirectory(prefix="engine_loader_test_") as tmp:
+        zip_path = write_zip(
+            tmp,
+            "shadowmod.zip",
+            {"shadowmod/__init__.py": "", "shadowmod/components.py": source},
+        )
+        registry = Registry().load(tmp, strict=False)
+        check(len(registry.skipped) == 1, f"应恰好跳过一条：{registry.skipped}")
+        check(
+            "PLUGIN_NAME" in registry.skipped[0]["reason"],
+            f"reason 应是缺 PLUGIN_NAME：{registry.skipped[0]}",
+        )
+        check(
+            str(zip_path.resolve()) not in sys.path,
+            "坏 zip 必须从 sys.path 摘下",
+        )
+        check("shadowmod" not in sys.modules, "坏包的 sys.modules 残留必须清掉")
+        try:
+            importlib.import_module("shadowmod")
+        except ModuleNotFoundError:
+            pass
+        else:
+            raise AssertionError("坏 zip 里的 shadowmod 不应还能导入")
+
+
+def case_tolerant_plugin_name_conflict_is_hard_error():
+    """宽容模式也不吞同名插件：PluginNameConflict 文案带两个 zip 的绝对路径。"""
+    with tempfile.TemporaryDirectory(prefix="engine_loader_test_") as tmp:
+        root = Path(tmp)
+        dir_a = root / "a"
+        dir_b = root / "b"
+        dir_a.mkdir()
+        dir_b.mkdir()
+        first = write_zip(dir_a, "ldp41.zip", plugin_files("ldp41"))
+        second = write_zip(dir_b, "ldp41.zip", plugin_files("ldp41"))
+        exc = expect_raises(
+            PluginNameConflict,
+            lambda: Registry().load(dir_a, dir_b, strict=False),
+            "插件名重复",
+        )
+        text = str(exc)
+        check(str(first.resolve()) in text, f"文案应含第一个 zip 的绝对路径：{text!r}")
+        check(str(second.resolve()) in text, f"文案应含第二个 zip 的绝对路径：{text!r}")
+
+
+def case_strict_hard_errors_without_skips():
+    """strict=True：坏 zip 直接抛，skipped 为空；同名冲突仍是 PluginNameConflict。"""
+    with tempfile.TemporaryDirectory(prefix="engine_loader_test_") as tmp:
+        write_zip(tmp, "zz_no_plugin.zip", {"broken.txt": ""})
+        registry = Registry()
+        expect_raises(
+            PluginLoadError,
+            lambda: registry.load(tmp, strict=True),
+            "顶层必须恰好一个插件目录",
+        )
+        check(registry.skipped == [], f"strict 模式不应有 skipped：{registry.skipped}")
+
+    with tempfile.TemporaryDirectory(prefix="engine_loader_test_") as tmp:
+        root = Path(tmp)
+        dir_a = root / "a"
+        dir_b = root / "b"
+        dir_a.mkdir()
+        dir_b.mkdir()
+        write_zip(dir_a, "ldp43.zip", plugin_files("ldp43"))
+        write_zip(dir_b, "ldp43.zip", plugin_files("ldp43"))
+        exc = expect_raises(
+            PluginNameConflict,
+            lambda: Registry().load(dir_a, dir_b, strict=True),
+            "插件名重复",
+        )
+        check(
+            isinstance(exc, PluginLoadError),
+            f"PluginNameConflict 应是 PluginLoadError 子类：{type(exc)}",
+        )
+
+
+def case_tolerant_keeps_schema_errors():
+    """宽容模式不吞 schema 错误：插件加载成功但类型未注册仍抛，且不进 skipped。"""
+    source = plugin_source(
+        "ldp42",
+        class_name="Bad",
+        output_schema='{"out": {"type": "nosuch"}}',
+    )
+    with tempfile.TemporaryDirectory(prefix="engine_loader_test_") as tmp:
+        write_zip(
+            tmp,
+            "ldp42.zip",
+            {"ldp42/__init__.py": "", "ldp42/components.py": source},
+        )
+        registry = Registry()
+        expect_raises(
+            SchemaError,
+            lambda: registry.load(tmp, strict=False),
+            "未注册",
+        )
+        check(
+            registry.skipped == [],
+            f"schema 错误不算跳过，skipped 应为空：{registry.skipped}",
+        )
+        check(
+            all(entry["file"] != "ldp42.zip" for entry in registry.skipped),
+            f"出错的插件不能出现在 skipped：{registry.skipped}",
+        )
+
+
+def case_default_load_is_strict():
+    """不传 strict 就是严格模式：坏 zip 直接抛，保住 CLI 行为。"""
+    with tempfile.TemporaryDirectory(prefix="engine_loader_test_") as tmp:
+        write_zip(tmp, "zz_no_plugin_default.zip", {"broken.txt": ""})
+        registry = Registry()
+        expect_raises(
+            PluginLoadError,
+            lambda: registry.load(tmp),
+            "顶层必须恰好一个插件目录",
+        )
+        check(registry.skipped == [], f"默认严格模式不应有 skipped：{registry.skipped}")
+
+
 CASES = [
     ("合法临时插件可加载", case_good_plugin_loads),
     ("真实插件 zip 可加载", case_real_plugins_load),
@@ -942,6 +1098,12 @@ CASES = [
     ("同一目录重复 load 真正重载", case_reload_same_dir),
     ("不同目录同名插件取第二个 zip 内容", case_reload_other_dir_same_package),
     ("改 zip 内容后重载生效", case_reload_modified_zip),
+    ("宽容模式：非插件 zip 进 skipped 且插件照常加载", case_tolerant_skips_non_plugin_zip),
+    ("宽容模式：失败 zip 摘下 sys.path 并清模块", case_tolerant_failed_zip_unmounted_and_purged),
+    ("宽容模式：同名插件仍是硬错误", case_tolerant_plugin_name_conflict_is_hard_error),
+    ("严格模式：硬错误且 skipped 为空", case_strict_hard_errors_without_skips),
+    ("宽容模式：schema 错误不吞且不进 skipped", case_tolerant_keeps_schema_errors),
+    ("默认参数是严格模式", case_default_load_is_strict),
 ]
 
 

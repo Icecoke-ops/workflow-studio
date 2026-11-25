@@ -22,7 +22,7 @@ from importlib.machinery import PathFinder
 from pathlib import Path
 
 from . import stdtypes
-from .errors import PluginLoadError
+from .errors import PluginLoadError, PluginNameConflict
 from .typeid import is_name, is_version
 
 _REQ_SPLIT = re.compile(r"[<>=!~\[; ]")
@@ -117,6 +117,14 @@ def add_all_to_sys_path(zip_paths):
     unmount_plugins()
     for zip_path in zip_paths:
         _mount(zip_path)
+
+
+def unmount_plugin(zip_path):
+    """摘下单个插件 zip（宽容模式跳过坏包时用，别让残留路径影响后续加载）。"""
+    path = str(Path(zip_path).resolve())
+    while path in sys.path:
+        sys.path.remove(path)
+    _MOUNTED.discard(path)
 
 
 def _is_importable_top_level(name):
@@ -255,7 +263,15 @@ def _collect_types(package):
 def load_plugin(zip_path, loaded_names):
     package = _package_name(zip_path)
     if package in loaded_names:
-        raise PluginLoadError(f"插件名重复：{package}（{zip_path.name}）")
+        previous = loaded_names.get(package) if hasattr(loaded_names, "get") else None
+        source = getattr(previous, "source", "")
+        if not source or source.startswith("<"):
+            source = "已加载的插件"
+        else:
+            source = str(Path(source).resolve())
+        raise PluginNameConflict(
+            f"插件名重复：{package}（{source} 与 {Path(zip_path).resolve()}）"
+        )
 
     _check_requirements(zip_path, package)
     module = _import_components(zip_path, package)
