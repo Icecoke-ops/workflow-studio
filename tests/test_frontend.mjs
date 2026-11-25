@@ -39,6 +39,7 @@ import {
   isFlowPath,
   newFlowText,
 } from '../frontend/src/documents.js'
+import { normalizeProject } from '../frontend/src/project.js'
 import {
   fetchHealth,
   fetchPlugins,
@@ -2033,6 +2034,96 @@ addCase('documents newFlowText 使用 2 空格缩进', () => {
   const text = newFlowText('x')
   check(text.includes('\n  "name": "x"'), `应是 2 空格缩进：${JSON.stringify(text)}`)
   check(!text.includes('\n    "name"'), '不能是 4 空格缩进')
+})
+
+// ---- project.js（/api/project 载荷 -> 工作台项目状态） ----
+
+addCase('project normalizeProject 正常载荷原样转换', () => {
+  const state = normalizeProject({
+    ok: true,
+    root: 'C:\\proj',
+    name: 'proj',
+    launcher: 'http://127.0.0.1:8765',
+  })
+  assertDeepEqual(
+    state,
+    {
+      project: { root: 'C:\\proj', name: 'proj', launcher: 'http://127.0.0.1:8765' },
+      degraded: false,
+      errors: [],
+    },
+    '正常载荷',
+  )
+})
+
+addCase('project normalizeProject 同名冲突降级但项目仍可用', () => {
+  const state = normalizeProject({
+    ok: false,
+    root: 'C:\\proj',
+    name: 'proj',
+    launcher: null,
+    errors: ['插件名重复：core（C:\\a\\core.zip 与 C:\\b\\core.zip）'],
+  })
+  check(state !== null, '冲突载荷有合法 root，不能当成没有项目')
+  assertDeepEqual(
+    state.project,
+    { root: 'C:\\proj', name: 'proj', launcher: null },
+    '降级时 project 仍须合法',
+  )
+  check(state.degraded === true, `ok:false 必须 degraded:true，实际 ${state.degraded}`)
+  assertDeepEqual(state.errors, ['插件名重复：core（C:\\a\\core.zip 与 C:\\b\\core.zip）'], 'errors 应保留')
+})
+
+addCase('project normalizeProject 非对象载荷返回 null', () => {
+  for (const payload of [null, undefined, 0, 'proj', true, []]) {
+    check(normalizeProject(payload) === null, `${JSON.stringify(payload)} 应返回 null`)
+  }
+})
+
+addCase('project normalizeProject root 缺失/空串/非字符串返回 null', () => {
+  for (const payload of [{}, { root: '' }, { root: null }, { root: 42 }, { ok: true, name: 'p' }]) {
+    check(normalizeProject(payload) === null, `${JSON.stringify(payload)} 应返回 null`)
+  }
+})
+
+addCase('project normalizeProject name 回落 root、launcher 回落 null', () => {
+  const base = { ok: true, root: 'C:\\proj' }
+  for (const name of [undefined, '', null, 42]) {
+    const state = normalizeProject({ ...base, name })
+    check(
+      state.project.name === 'C:\\proj',
+      `name=${JSON.stringify(name)} 应回落 root，实际 ${JSON.stringify(state.project.name)}`,
+    )
+  }
+  for (const launcher of [undefined, '', null, 42]) {
+    const state = normalizeProject({ ...base, launcher })
+    check(
+      state.project.launcher === null,
+      `launcher=${JSON.stringify(launcher)} 应回落 null，实际 ${JSON.stringify(state.project.launcher)}`,
+    )
+  }
+})
+
+addCase('project normalizeProject errors 只留非空字符串、ok 非 false 不降级', () => {
+  for (const errors of [undefined, {}, 'boom', 42]) {
+    assertDeepEqual(
+      normalizeProject({ root: 'r', errors }).errors,
+      [],
+      `errors=${JSON.stringify(errors)} 应清洗成空数组`,
+    )
+  }
+  assertDeepEqual(
+    normalizeProject({ root: 'r', errors: ['a', '', 3, null, 'b'] }).errors,
+    ['a', 'b'],
+    '只留非空字符串',
+  )
+  for (const ok of [undefined, true, 0, 'false', null]) {
+    check(
+      normalizeProject({ root: 'r', ok }).degraded === false,
+      `ok=${JSON.stringify(ok)} 不应降级`,
+    )
+  }
+  check(normalizeProject({ root: 'r', ok: false }).degraded === true, 'ok:false 必须降级')
 })
 
 function jsonResponse(status, payload) {

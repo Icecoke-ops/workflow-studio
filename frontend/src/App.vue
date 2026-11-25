@@ -31,6 +31,7 @@ import { collectCopy, planPaste } from './clipboard'
 import { DebugClient } from './debug/client.js'
 import { EMPTY_VIEW, appendLog, applyState, isBusy } from './debug/model.js'
 import { isFlowPath, normalizePath, titleFromPath } from './documents'
+import { normalizeProject } from './project'
 import {
   canGroup,
   commonParent,
@@ -101,6 +102,8 @@ const envDrawerVisible = ref(false)
 
 // ---- 项目与文档（当前只允许一个文档，结构上按多标签留） ------------------
 const project = ref(null) // { root, name, launcher }
+const projectDegraded = ref(false)
+const projectErrors = ref([])
 const leftView = ref('explorer')
 const docs = ref([])
 const activeId = ref(null)
@@ -573,15 +576,28 @@ function fileErrors(data) {
 }
 
 async function loadProject() {
+  let data
   try {
-    const data = await fetchProject()
-    if (data.ok === false) throw new Error(fileErrors(data))
-    project.value = { root: data.root, name: data.name, launcher: data.launcher }
-    if (data.skipped?.length) ElMessage.warning(`有 ${data.skipped.length} 个插件未能加载`)
+    data = await fetchProject()
   } catch (err) {
     project.value = null
+    projectDegraded.value = false
+    projectErrors.value = []
     ElMessage.error(`读取项目失败：${err.message}`)
+    return
   }
+  const info = normalizeProject(data)
+  if (!info) {
+    project.value = null
+    projectDegraded.value = false
+    projectErrors.value = []
+    ElMessage.error('读取项目失败：后端没有返回项目根目录')
+    return
+  }
+  project.value = info.project
+  projectDegraded.value = info.degraded
+  projectErrors.value = info.errors
+  if (data.skipped?.length) ElMessage.warning(`有 ${data.skipped.length} 个插件未能加载`)
 }
 
 async function confirmDiscard() {
@@ -1004,7 +1020,7 @@ onBeforeUnmount(() => {
         type="primary"
         plain
         :loading="validating"
-        :disabled="running || !activeDoc || activeDoc.kind !== 'flow'"
+        :disabled="running || !activeDoc || activeDoc.kind !== 'flow' || projectDegraded"
         @click="doValidate"
       >
         校验
@@ -1013,7 +1029,7 @@ onBeforeUnmount(() => {
         size="small"
         type="primary"
         :loading="running"
-        :disabled="validating || !activeDoc || activeDoc.kind !== 'flow'"
+        :disabled="validating || !activeDoc || activeDoc.kind !== 'flow' || projectDegraded"
         @click="doRun"
       >
         运行
@@ -1024,7 +1040,7 @@ onBeforeUnmount(() => {
         :type="debugActive ? 'danger' : 'primary'"
         plain
         :loading="debugStarting"
-        :disabled="running || validating || !activeDoc || activeDoc.kind !== 'flow'"
+        :disabled="running || validating || !activeDoc || activeDoc.kind !== 'flow' || projectDegraded"
         @click="toggleDebug"
       >
         {{ debugActive ? '结束调试' : '调试' }}
@@ -1047,6 +1063,11 @@ onBeforeUnmount(() => {
         {{ serverOnline === null ? '检测后端…' : serverOnline ? '后端在线' : '后端未连接' }}
       </el-tag>
     </header>
+
+    <div v-if="projectDegraded" class="project-degraded" role="alert">
+      <div class="degraded-text">插件加载失败，校验/运行/调试不可用；可删除冲突插件后重启项目。</div>
+      <div v-if="projectErrors.length" class="degraded-detail">{{ projectErrors.join('；') }}</div>
+    </div>
 
     <main class="main">
       <ActivityBar v-model:active="leftView" />
@@ -1184,6 +1205,27 @@ onBeforeUnmount(() => {
 
 .topbar :deep(.el-button + .el-button) {
   margin-left: 0;
+}
+
+.project-degraded {
+  flex: none;
+  padding: 8px 12px;
+  background: #fdf6ec;
+  border-bottom: 1px solid #f5dab1;
+  color: #b88230;
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.degraded-text {
+  font-weight: 600;
+}
+
+.degraded-detail {
+  margin-top: 2px;
+  color: #a06a1f;
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 
 .brand {
