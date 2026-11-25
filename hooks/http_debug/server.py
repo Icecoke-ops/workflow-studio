@@ -11,20 +11,56 @@ import re
 import socket
 import threading
 import time
+import traceback
 from urllib.parse import parse_qs, urlsplit
-
-from websockets.exceptions import ConnectionClosed
-from websockets.protocol import OPEN
-from websockets.server import ServerProtocol
-from websockets.sync.server import ServerConnection
 
 from engine.errors import HookError
 
 from .fdlog import Outbox
 
+_WEBSOCKETS_MAJOR = 16
+
+
+def _require_websockets(version):
+    """版本或底层接口不符时的明确报错（裸 ImportError/AttributeError 不算）。"""
+    return (
+        f"http_debug 需要 websockets {_WEBSOCKETS_MAJOR}.x"
+        f"（实测 16.0），当前 {version or '未知'}；"
+        "请 pip install -r requirements.txt"
+    )
+
+
+try:
+    import websockets
+except ImportError as exc:
+    raise HookError(_require_websockets("未安装")) from exc
+
+_WEBSOCKETS_VERSION = str(getattr(websockets, "__version__", "")).strip()
+if _WEBSOCKETS_VERSION.split(".", 1)[0] != str(_WEBSOCKETS_MAJOR):
+    raise HookError(_require_websockets(_WEBSOCKETS_VERSION))
+
+# 16.x 的底层 API；旧版是 accept()/reject()，没有 handshake()/respond()
+try:
+    from websockets.datastructures import MultipleValuesError
+    from websockets.exceptions import ConnectionClosed, InvalidHandshake
+    from websockets.protocol import OPEN
+    from websockets.server import ServerProtocol
+    from websockets.sync.server import ServerConnection
+except (AttributeError, ImportError) as exc:
+    raise HookError(_require_websockets(_WEBSOCKETS_VERSION)) from exc
+
+if not (
+    callable(getattr(ServerConnection, "handshake", None))
+    and callable(getattr(ServerConnection, "respond", None))
+):
+    raise HookError(_require_websockets(_WEBSOCKETS_VERSION))
+
 HOST = "127.0.0.1"
 OUTBOX_LIMIT = 5000  # 每条连接的待发送上限：客户端积压时丢最旧的行
 ORIGIN_RE = re.compile(r"^http://(127\.0\.0\.1|localhost):\d+$")
+_REQUEST_LINE_RE = re.compile(rb"GET [^ ]* HTTP/1\.1")
+_HEADER_NAME_RE = re.compile(rb"[-!#$%&'*+.^_`|~0-9A-Za-z]+")
+_HEADER_VALUE_RE = re.compile(rb"[\x09\x20-\x7e\x80-\xff]*")
 
 
 class Server:
@@ -117,6 +153,15 @@ class Server:
         if first.startswith(b"POST "):
             self._handle_http(sock, first)
             return
+        split = first.split(b"\r\n\r\n", 1)
+        if len(split) == 2 and not _valid_http_head(split[0]):
+            # 库遇到解析不了的报文会先 send_eof 半关写端，事后再补包必失败，所以完整报文头
+            # 一到就先回 400。预检只覆盖语法，且要求报文头在一次 4096 字节读取内完整到达；
+            # 超过 4096、分包到达，以及语义非法（129 个头、Transfer-Encoding、非零/重复
+            # Content-Length）仍走库的静默半关，这里不重复做语义校验。
+            _respond(sock, "400 Bad Request", b"bad request\n")
+            _close_after_write(sock)
+            return
 
         protocol = ServerProtocol()
         websocket = ServerConnection(sock, protocol, close_timeout=5)
@@ -126,12 +171,19 @@ class Server:
                 server_header=None,
                 timeout=10,
             )
-        except Exception:
-            _close(websocket)
+        except (ConnectionClosed, OSError):
+            # 对端已断/没等到请求：没有可回响应的连接
+            _close_after_write(sock)
             return
+        except Exception as exc:
+            if not isinstance(exc, InvalidHandshake):
+                # 意料之外的异常不能静默：打印到 fd 2，Studio 的子进程 stderr / 日志会带出
+                traceback.print_exc()
+                _close(websocket)
+                return
         if websocket.state is not OPEN:
-            # token / Origin 校验没过：握手已经被拒，直接丢掉
-            _close(websocket)
+            # 握手期被拒（token/Origin/协议头/报文解析）：能发的响应库已发完，状态没进 OPEN
+            _close_after_write(sock)
             return
 
         client = Connection(websocket, self.on_command)
@@ -150,7 +202,11 @@ class Server:
         token = (parse_qs(urlsplit(request.path).query).get("token") or [""])[0]
         if token != self.token:
             return websocket.respond(403, "bad token\n")
-        origin = request.headers.get("Origin")
+        try:
+            origin = request.headers.get("Origin")
+        except MultipleValuesError:
+            # 重复 Origin：按坏 Origin 处理，不要让它变成库的 500 + traceback
+            return websocket.respond(403, "bad origin\n")
         if origin is not None and not ORIGIN_RE.match(origin):
             return websocket.respond(403, "bad origin\n")
         return None
@@ -175,15 +231,7 @@ class Server:
             else:
                 body = b"not found\n"
                 status = "404 Not Found"
-            sock.sendall(
-                (
-                    f"HTTP/1.1 {status}\r\n"
-                    "Content-Type: text/plain; charset=utf-8\r\n"
-                    f"Content-Length: {len(body)}\r\n"
-                    "Connection: close\r\n\r\n"
-                ).encode("latin-1")
-                + body
-            )
+            _respond(sock, status, body)
         except OSError:
             pass
         finally:
@@ -236,4 +284,43 @@ def _close(resource):
         resource.close()
     except Exception:
         pass
+
+
+def _valid_http_head(head):
+    """完整报文头是否是 websockets 自己能解析的 GET 升级请求；语法按库的解析口径写。"""
+    lines = head.split(b"\r\n")
+    if _REQUEST_LINE_RE.fullmatch(lines[0]) is None:
+        return False
+    for line in lines[1:]:
+        name, sep, value = line.partition(b":")
+        if not sep or _HEADER_NAME_RE.fullmatch(name) is None:
+            return False
+        if _HEADER_VALUE_RE.fullmatch(value.strip(b" \t")) is None:
+            return False
+    return True
+
+
+def _respond(sock, status, body):
+    """回一条最小 HTTP 响应；正文与 Content-Length 逐字节对应。"""
+    try:
+        sock.sendall(
+            (
+                f"HTTP/1.1 {status}\r\n"
+                "Content-Type: text/plain; charset=utf-8\r\n"
+                f"Content-Length: {len(body)}\r\n"
+                "Connection: close\r\n\r\n"
+            ).encode("latin-1")
+            + body
+        )
+    except OSError:
+        pass
+
+
+def _close_after_write(sock):
+    """先半关写端再 close：避免未读数据让 close 变成 RST，把已写出的响应吃掉。"""
+    try:
+        sock.shutdown(socket.SHUT_WR)
+    except OSError:
+        pass
+    _close(sock)
 

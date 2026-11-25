@@ -427,12 +427,13 @@ def run(workflow, registry, on_node_done=None) -> dict[str, NodeResult]
 
 ### 9.6 官方钩子：`hooks/http_debug/`
 
-WebSocket 服务，Studio 的调试器直连。引擎启动后**不自动跑任何节点**，一切等命令。该钩子依赖 `websockets`（已在仓库根 `requirements.txt` 里声明，锁在实测过的大版本）。
+WebSocket 服务，Studio 的调试器直连。引擎启动后**不自动跑任何节点**，一切等命令。该钩子依赖 `websockets`（已在仓库根 `requirements.txt` 里声明，锁在实测过的大版本）；**版本或底层接口不符时钩子直接拒绝启动**，错误文案带当前版本与 `pip install -r requirements.txt`，不会静默连不上。
 
 - `hook_port`（可选）：给了就绑这个端口，`0` 或省略由系统分配。
 - `hook_token`（必填，缺则拒绝启动）。
 - `hook_port_file`（必填）：**钩子绑定成功之后**立刻把实际端口写进这个文件（纯文本一行数字）。Studio 以「这个文件出现」作为就绪信号，**不再靠尝试连接端口来判断**——「连得上」不等于「那是自己的子进程」，端口被别的会话占用时会把别人的钩子当成自己的。
-- 地址 `ws://127.0.0.1:<hook_port>/?token=<hook_token>`；token 不符立即关闭连接；带 `Origin` 时必须匹配 `http://127.0.0.1:<任意端口>` 或 `http://localhost:<任意端口>`。
+- 地址 `ws://127.0.0.1:<hook_port>/?token=<hook_token>`；带 `Origin` 时必须匹配 `http://127.0.0.1:<任意端口>` 或 `http://localhost:<任意端口>`。
+- **握手被拒一律先回 HTTP 响应再关连接**，不静默断联：token 不符回 `403 bad token`、`Origin` 不符回 `403 bad origin`、缺 `Upgrade` 由库回 `426`、报文头语法非法回 `400 bad request`。响应带 `Connection: close` 与简短正文，发完 `shutdown` 写端再关，避免 RST 吃掉正文。预检只覆盖**语法**，且要求完整报文头在**一次 4096 字节读取**内：超过 4096 字节、分包到达的头，以及语义非法（如 129 个头、非零或重复 `Content-Length`）仍可能被直接关闭——那是库自身的行为，不额外模拟。
 - 同一时刻只执行一条命令，忙时回 `error`（**`inspect` 例外**：它只读堆，执行中也可以发）。
 
 命令（客户端 → 服务）：

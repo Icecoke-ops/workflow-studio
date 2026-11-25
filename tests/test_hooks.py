@@ -13,6 +13,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import types
 import zipfile
 from pathlib import Path
@@ -1523,6 +1524,286 @@ def case_inspect_shape():
     )
 
 
+# ---------------------------------------------------------------------------
+# 官方钩子 hooks/http_debug/server.py：websockets 版本/接口校验、握手异常留痕
+# ---------------------------------------------------------------------------
+
+
+def _write_fake_websockets(directory, *, version, with_handshake):
+    """造一个只够 import 的 websockets 假包；__init__.py 只写 __version__。"""
+    package = Path(directory) / "websockets"
+    (package / "sync").mkdir(parents=True)
+    (package / "__init__.py").write_text(f'__version__ = "{version}"\n', encoding="utf-8")
+    (package / "datastructures.py").write_text(
+        "class MultipleValuesError(Exception):\n    pass\n", encoding="utf-8"
+    )
+    (package / "exceptions.py").write_text(
+        "class ConnectionClosed(Exception):\n"
+        "    pass\n"
+        "\n"
+        "\n"
+        "class InvalidHandshake(Exception):\n"
+        "    pass\n",
+        encoding="utf-8",
+    )
+    (package / "protocol.py").write_text("OPEN = 1\n", encoding="utf-8")
+    (package / "server.py").write_text(
+        "class ServerProtocol:\n    pass\n", encoding="utf-8"
+    )
+    (package / "sync" / "__init__.py").write_text("", encoding="utf-8")
+    methods = ""
+    if with_handshake:
+        methods = (
+            "\n    def handshake(self, **kwargs):\n"
+            "        pass\n"
+            "\n    def respond(self, *args, **kwargs):\n"
+            "        pass\n"
+        )
+    (package / "sync" / "server.py").write_text(
+        "class ServerConnection:\n"
+        "    def __init__(self, *args, **kwargs):\n"
+        "        pass\n" + methods,
+        encoding="utf-8",
+    )
+    return Path(directory)
+
+
+def _run_hook_import(tmp, fake_dir, prelude=""):
+    """子进程里 import server.py；输出落文件（沙箱里管道不可用）。"""
+    log_path = Path(tmp) / "hook_import.log"
+    env = dict(os.environ)
+    env["PYTHONPATH"] = os.pathsep.join([str(fake_dir), str(ROOT)])
+    env["PYTHONIOENCODING"] = "utf-8"
+    source = prelude + "\nimport hooks.http_debug.server\n"
+    with open(log_path, "wb") as handle:
+        completed = subprocess.run(
+            [sys.executable, "-X", "utf8", "-c", source],
+            cwd=str(ROOT),
+            env=env,
+            stdout=handle,
+            stderr=subprocess.STDOUT,
+        )
+    return completed.returncode, log_path.read_text(encoding="utf-8", errors="replace")
+
+
+def _check_hook_rejected(tmp, fake_dir, version, prelude=""):
+    """子进程 import server.py 必须失败：三段文案齐全且抛的是 HookError。"""
+    code, output = _run_hook_import(tmp, fake_dir, prelude=prelude)
+    check(code != 0, f"应非零退出，实际 {code}：{output}")
+    for fragment in (
+        "websockets 16.x",
+        f"当前 {version}",
+        "pip install -r requirements.txt",
+    ):
+        check(fragment in output, f"输出应含 {fragment!r}：{output}")
+    check("engine.errors.HookError" in output, f"应抛 HookError：{output}")
+
+
+def case_websockets_version_mismatch():
+    """12.0 即使接口齐全也必须被版本校验拒绝。"""
+    with tempfile.TemporaryDirectory(prefix="hook_ws_ver_") as tmp:
+        fake = _write_fake_websockets(
+            Path(tmp) / "fake", version="12.0", with_handshake=True
+        )
+        _check_hook_rejected(tmp, fake, "12.0")
+
+
+def case_websockets_missing_interface():
+    """版本号对但 ServerConnection 缺 handshake/respond：仍拒绝，不能只比版本。"""
+    with tempfile.TemporaryDirectory(prefix="hook_ws_api_") as tmp:
+        fake = _write_fake_websockets(
+            Path(tmp) / "fake", version="16.0", with_handshake=False
+        )
+        _check_hook_rejected(tmp, fake, "16.0")
+
+
+def case_websockets_not_installed():
+    """真实 websockets 被 sys.modules 屏蔽时回 HookError「未安装」，不是裸 ImportError。"""
+    with tempfile.TemporaryDirectory(prefix="hook_ws_none_") as tmp:
+        empty = Path(tmp) / "empty"
+        empty.mkdir()
+        _check_hook_rejected(
+            tmp,
+            empty,
+            "未安装",
+            prelude='import sys; sys.modules["websockets"] = None',
+        )
+
+
+def case_handshake_unexpected_exception_is_logged():
+    """handshake 抛意外异常时不能静默：traceback 打到 stderr，连接照常关闭。"""
+    import contextlib
+    import io
+
+    from hooks.http_debug import server as server_mod
+
+    class FakeSock:
+        def settimeout(self, value):
+            pass
+
+        def recv(self, size, flags=0):
+            return b"GET /?token=tok HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n"
+
+    class FakeProtocol:
+        pass
+
+    created = []
+
+    class FakeConnection:
+        def __init__(self, sock, protocol, close_timeout=5):
+            self.sock = sock
+            self.closed = False
+            created.append(self)
+
+        def handshake(self, **kwargs):
+            raise RuntimeError("handshake boom")
+
+        def close(self):
+            self.closed = True
+
+    original_protocol = server_mod.ServerProtocol
+    original_connection = server_mod.ServerConnection
+    server_mod.ServerProtocol = FakeProtocol
+    server_mod.ServerConnection = FakeConnection
+    server = server_mod.Server(0, "tok", "", lambda client, message: None)
+    stderr = io.StringIO()
+    try:
+        with contextlib.redirect_stderr(stderr):
+            server._handle_socket(FakeSock())
+    finally:
+        server_mod.ServerProtocol = original_protocol
+        server_mod.ServerConnection = original_connection
+
+    text = stderr.getvalue()
+    check("Traceback (most recent call last)" in text, f"意外异常应打印 traceback：{text!r}")
+    check("RuntimeError: handshake boom" in text, f"traceback 应含原始异常：{text!r}")
+    check(len(created) == 1, f"应构造一条连接：{len(created)}")
+    check(created[0].closed, "异常之后连接必须关闭")
+
+
+# ---------------------------------------------------------------------------
+# 官方钩子 hooks/http_debug/server.py：HTTP 头预检与 400/403/426
+# ---------------------------------------------------------------------------
+
+
+def _with_hook_server(tmp, fn):
+    """起一个真实 hook 服务（端口文件出现 = 就绪），跑完停线程。"""
+    from hooks.http_debug import server as server_mod
+
+    port_file = Path(tmp) / "hook_port"
+    server = server_mod.Server(
+        0, "tok", str(port_file), lambda client, message: None
+    )
+    thread = threading.Thread(target=server.run, daemon=True)
+    thread.start()
+    deadline = time.time() + 5
+    while not port_file.is_file():
+        if time.time() > deadline:
+            raise AssertionError("http_debug 服务 5 秒内没有写出端口文件")
+        time.sleep(0.01)
+    try:
+        fn(int(port_file.read_text(encoding="utf-8").strip()))
+    finally:
+        server._stop.set()
+        thread.join(timeout=5)
+        check(not thread.is_alive(), "http_debug 服务线程应退出")
+
+
+def _raw_http(port, payload, timeout=5):
+    """发原始字节读到 EOF；返回 (收到的全部字节, 是否读到 EOF)。"""
+    chunks = []
+    eof = False
+    with socket.create_connection(("127.0.0.1", port), timeout=timeout) as client:
+        client.settimeout(timeout)
+        client.sendall(payload)
+        while True:
+            try:
+                chunk = client.recv(4096)
+            except socket.timeout:
+                break
+            if not chunk:
+                eof = True
+                break
+            chunks.append(chunk)
+    return b"".join(chunks), eof
+
+
+def _expect_http(port, payload, status, body=b"", timeout=5):
+    """发原始字节，断言状态行/正文/EOF；返回完整响应供调用方再查头。"""
+    response, eof = _raw_http(port, payload, timeout=timeout)
+    check(response.startswith(status), f"应回 {status!r}，实际收到 {response!r}")
+    if body:
+        check(body in response, f"正文应含 {body!r}：{response!r}")
+    check(eof, f"响应用完后连接应正常关闭（EOF）：{response!r}")
+    return response
+
+
+def case_http_head_invalid_gets_400():
+    """报文头连 HTTP 都解析不了：hook 自己回 400 + Connection: close + 正文，再正常关闭。"""
+    payloads = [
+        b"GARBAGE / HTTP/1.1\r\n\r\n",
+        b"GET / HTTP/1.1\r\nBad Header\r\n\r\n",
+    ]
+    with tempfile.TemporaryDirectory(prefix="hook_http_400_") as tmp:
+        def run(port):
+            for payload in payloads:
+                response = _expect_http(
+                    port, payload, b"HTTP/1.1 400 Bad Request", b"bad request"
+                )
+                check(
+                    b"Connection: close" in response,
+                    f"400 应带 Connection: close：{response!r}",
+                )
+
+        _with_hook_server(tmp, run)
+
+
+def case_http_wrong_token_gets_403():
+    """错误 token 仍由 process_request 回 403 bad token，不能被 400 预检吞掉。"""
+    request = (
+        b"GET /?token=wrong HTTP/1.1\r\n"
+        b"Host: 127.0.0.1\r\n"
+        b"Upgrade: websocket\r\n"
+        b"Connection: Upgrade\r\n"
+        b"Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n"
+        b"Sec-WebSocket-Version: 13\r\n\r\n"
+    )
+    with tempfile.TemporaryDirectory(prefix="hook_http_403_") as tmp:
+        def run(port):
+            _expect_http(port, request, b"HTTP/1.1 403 Forbidden", b"bad token")
+
+        _with_hook_server(tmp, run)
+
+
+def case_http_missing_upgrade_gets_426():
+    """合法 GET 但缺 Upgrade：库自己回 426，预检不能把它改成 400。"""
+    request = b"GET /?token=tok HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n"
+    with tempfile.TemporaryDirectory(prefix="hook_http_426_") as tmp:
+        def run(port):
+            _expect_http(port, request, b"HTTP/1.1 426 ")
+
+        _with_hook_server(tmp, run)
+
+
+def case_http_duplicate_origin_gets_403():
+    """重复 Origin 头 → 403 bad origin，不能变成库的 500 + traceback。"""
+    request = (
+        b"GET /?token=tok HTTP/1.1\r\n"
+        b"Host: 127.0.0.1\r\n"
+        b"Upgrade: websocket\r\n"
+        b"Connection: Upgrade\r\n"
+        b"Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n"
+        b"Sec-WebSocket-Version: 13\r\n"
+        b"Origin: http://127.0.0.1:5173\r\n"
+        b"Origin: http://localhost:5173\r\n\r\n"
+    )
+    with tempfile.TemporaryDirectory(prefix="hook_http_origin_") as tmp:
+        def run(port):
+            _expect_http(port, request, b"HTTP/1.1 403 Forbidden", b"bad origin")
+
+        _with_hook_server(tmp, run)
+
+
 CASES = [
     ("事件顺序：前三个 → 建实例 → 逐节点执行 → run_end", case_event_order),
     ("每个事件的 data 键与 9.2 表一致", case_event_data_keys),
@@ -1552,6 +1833,14 @@ CASES = [
     ("http_debug：inspect 未知节点 / 非字符串 id 回 error", case_inspect_unknown_node),
     ("http_debug：忙时 inspect 仍可用，run_node 仍被拒", case_inspect_while_busy),
     ("http_debug：inspect 的 inputs/outputs 按堆与连线取", case_inspect_shape),
+    ("http_debug：websockets 版本不符报统一文案", case_websockets_version_mismatch),
+    ("http_debug：版本对但缺 handshake/respond 也拒绝", case_websockets_missing_interface),
+    ("http_debug：未安装 websockets 回 HookError 未安装", case_websockets_not_installed),
+    ("http_debug：握手期意外异常打印 traceback 不静默", case_handshake_unexpected_exception_is_logged),
+    ("http_debug：非法 HTTP 头回 400 bad request", case_http_head_invalid_gets_400),
+    ("http_debug：错误 token 仍回 403 bad token", case_http_wrong_token_gets_403),
+    ("http_debug：缺 Upgrade 由库回 426", case_http_missing_upgrade_gets_426),
+    ("http_debug：重复 Origin 回 403 bad origin", case_http_duplicate_origin_gets_403),
 ]
 
 
