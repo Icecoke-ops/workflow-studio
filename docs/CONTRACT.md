@@ -279,11 +279,11 @@ Studio 是两层进程：
 | POST | `/api/projects/close` | `{"root":"<目录>"}` → `{"ok":true,"errors":[]}`；未运行回 `ok:false` |
 | POST | `/api/projects/restart` | `{"root":"<目录>"}` → 同 open |
 | GET | `/api/fs/dirs` | `?path=<目录>`，空串表示盘符列表 → `{"ok":true,"path","parent","entries":[{"name","path"}]}`；`path` 为空串、`parent` 为 null 表示盘符层 |
-| GET | `/` | `studio/landing/index.html`（单文件静态页，无外部资源） |
+| GET | `/` | `studio/landing/index.html`（单文件静态页，无外部资源）；带 `?close=<项目根>` 时先弹确认，用户确认后才关闭该项目 |
 
 `url` 是 `http://127.0.0.1:<port>`，落地页在新标签页直接跳过去。打开项目时如果同目录已有实例，返回同一个 `port`/`pid`，不另起进程。
 
-错误口径：请求体不是 JSON 对象、缺字段、`path`/`root` 指向不存在或不是目录时回 400（`{"ok":false,"errors":[…]}`）；业务失败（项目未运行、端口被占用、子进程启动失败）回 200 + `ok:false`。项目服务不同：**所有业务失败都回 200 + `ok:false`**，只有报文形状错误才 4xx（§6.2）。
+错误口径：请求体不是 JSON 对象、缺字段、`path` 指向不存在或不是目录（`/api/projects`、`/api/fs/dirs`）时回 400（`{"ok":false,"errors":[…]}`）；业务失败（项目未运行、端口被占用、子进程启动失败）回 200 + `ok:false`。项目服务不同：**所有业务失败都回 200 + `ok:false`**，只有报文形状错误才 4xx（§6.2）。
 
 ### 6.2 项目服务 API
 
@@ -296,7 +296,7 @@ Studio 是两层进程：
 | GET | `/api/file` | `?path=` → `{"ok":true,"path","kind":"text"\|"binary"\|"too_large","size","text","errors":[]}` |
 | POST | `/api/file` | `{"path","text"}` → `{"ok":true,"path","size","errors":[]}`，原子写；`text` 必须是合法 UTF-8（孤立代理项回 `ok:false`） |
 | POST | `/api/mkdir` | `{"path"}` → `{"ok":true,"path","errors":[]}` |
-| POST | `/api/rename` | `{"path","new_name"}` → `{"ok":true,"path","errors":[]}`；`new_name` 必须能原样落盘：不含分隔符、`<>:"\|?*`、控制字符，不以点或空格结尾，不是 CON/PRN/AUX/NUL/COM1-9/LPT1-9 保留名 |
+| POST | `/api/rename` | `{"path","new_name"}` → `{"ok":true,"path","errors":[]}`；`new_name` 必须能原样落盘：不含分隔符、`<>:"\|?*`、控制字符，不以点或空格结尾，不是 CON/PRN/AUX/NUL/COM1-9/LPT1-9 保留名。`/api/file` POST 与 `/api/mkdir` 的路径每一段也按这套名字规则校验 |
 | POST | `/api/delete` | `{"path"}` → `{"ok":true,"path","errors":[]}`；目录必须为空，项目根不可删 |
 | POST | `/api/validate` | 请求 `{"workflow":{...}}` → `{"ok":bool,"errors":[],"warnings":[],"order":[]}` |
 | POST | `/api/run` | 请求同上 → `{"ok":bool,"errors":[],"warnings":[],"order":[],"nodes":[{id,component,ms,outputs:{端口:preview},"error":null}]}` |
