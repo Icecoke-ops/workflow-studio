@@ -283,6 +283,8 @@ Studio 是两层进程：
 
 `url` 是 `http://127.0.0.1:<port>`，落地页在新标签页直接跳过去。打开项目时如果同目录已有实例，返回同一个 `port`/`pid`，不另起进程。
 
+错误口径：请求体不是 JSON 对象、缺字段、`path`/`root` 指向不存在或不是目录时回 400（`{"ok":false,"errors":[…]}`）；业务失败（项目未运行、端口被占用、子进程启动失败）回 200 + `ok:false`。项目服务不同：**所有业务失败都回 200 + `ok:false`**，只有报文形状错误才 4xx（§6.2）。
+
 ### 6.2 项目服务 API
 
 | 方法 | 路径 | 响应 |
@@ -292,9 +294,9 @@ Studio 是两层进程：
 | GET | `/api/project` | `{"ok":true,"root","name","launcher","plugins":{"global":n,"project":n},"skipped":[{"file","path","reason","source"}],"errors":[]}` |
 | GET | `/api/tree` | `?path=<项目内相对路径>`（空串=项目根）→ `{"ok":true,"path","entries":[{name,path,kind:"dir"\|"file",size?}],"errors":[]}`，只列一层，目录在前 |
 | GET | `/api/file` | `?path=` → `{"ok":true,"path","kind":"text"\|"binary"\|"too_large","size","text","errors":[]}` |
-| POST | `/api/file` | `{"path","text"}` → `{"ok":true,"path","size","errors":[]}`，原子写 |
+| POST | `/api/file` | `{"path","text"}` → `{"ok":true,"path","size","errors":[]}`，原子写；`text` 必须是合法 UTF-8（孤立代理项回 `ok:false`） |
 | POST | `/api/mkdir` | `{"path"}` → `{"ok":true,"path","errors":[]}` |
-| POST | `/api/rename` | `{"path","new_name"}` → `{"ok":true,"path","errors":[]}`；只改名，`new_name` 不能带分隔符 |
+| POST | `/api/rename` | `{"path","new_name"}` → `{"ok":true,"path","errors":[]}`；`new_name` 必须能原样落盘：不含分隔符、`<>:"\|?*`、控制字符，不以点或空格结尾，不是 CON/PRN/AUX/NUL/COM1-9/LPT1-9 保留名 |
 | POST | `/api/delete` | `{"path"}` → `{"ok":true,"path","errors":[]}`；目录必须为空，项目根不可删 |
 | POST | `/api/validate` | 请求 `{"workflow":{...}}` → `{"ok":bool,"errors":[],"warnings":[],"order":[]}` |
 | POST | `/api/run` | 请求同上 → `{"ok":bool,"errors":[],"warnings":[],"order":[],"nodes":[{id,component,ms,outputs:{端口:preview},"error":null}]}` |
@@ -322,11 +324,16 @@ Studio 是两层进程：
 - **插件必须原样透传**：项目根下有 `plugins/` 时追加 `--plugins-dir <项目根>/plugins`，与 Studio 主进程加载的是同一批 zip；否则调试子进程看到的插件跟主进程不一致，那种差异以后极难查。`-e` 同样原样透传。
 - **同一时刻只允许一个调试会话**；新 `start` 先按 `stop` 流程关掉旧的。
 - `stop`：先 `POST http://127.0.0.1:<port>/shutdown` 让它自己退，3 秒内没退就 `kill`；删临时文件。未知 `session` 回 `ok:false`。
-- 子进程的 stdout/stderr 由 Studio 接管，不混进 Studio 自己的输出；Studio 进程退出时关掉所有调试子进程。
+- 子进程的 stdout/stderr 由 Studio 接管，不混进 Studio 自己的输出；Studio 进程退出时关掉所有调试子进程。Windows 上调试子进程被放进 Job Object（父进程死掉即终止）；其它平台没有等价兜底，项目进程被 SIGTERM 时调试子进程可能残留——当前只在 Windows 实测。
 
 ### 6.4 绑定与认证
 
-launcher 与项目服务都固定绑 `127.0.0.1`。服务没有任何认证，能连上端口的人都可以调 `/api/run`、读写项目文件，所以不提供局域网暴露，也不要把它当多用户服务用。
+launcher 与项目服务都固定绑 `127.0.0.1`，并校验请求来源：
+
+- `Host` 只接受 `127.0.0.1:<本端口>` 与 `localhost:<本端口>`，否则 403；挡 DNS rebinding。
+- POST 若带 `Origin`，必须与 `http://127.0.0.1:<本端口>` / `http://localhost:<本端口>` 同源，否则 403；无 `Origin`（curl、测试）放行。挡住本机其它页面的跨源读写。
+
+服务没有认证，能连上端口的人都可以调 `/api/run`、读写项目文件，所以不提供局域网暴露，也不要把它当多用户服务用。
 
 ### 6.5 前端构建约束（踩过坑）
 
