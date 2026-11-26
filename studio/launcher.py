@@ -39,7 +39,6 @@ START_TIMEOUT = 10.0
 STOP_TIMEOUT = 10.0
 RESTART_ATTEMPTS = 10
 RESTART_DELAY = 0.1
-MAX_BODY = 1024 * 1024
 
 
 class Launcher(LauncherApi):
@@ -65,8 +64,8 @@ class Launcher(LauncherApi):
             entry = self._projects.get(_key(root))
             if entry is not None:
                 return check_project_result(ok(project=self._public(entry)))
-            started, entry, errors, _ = self._spawn_locked(root, None)
-        if not started:
+            entry, errors, _ = self._spawn_locked(root, None)
+        if entry is None:
             return check_project_result(fail(errors, project=None))
         return check_project_result(ok(project=self._public(entry)))
 
@@ -89,8 +88,8 @@ class Launcher(LauncherApi):
             path = entry["root"]
             self._stop_locked(entry)
             for attempt in range(RESTART_ATTEMPTS):
-                started, new_entry, errors, retryable = self._spawn_locked(path, port)
-                if started:
+                new_entry, errors, retryable = self._spawn_locked(path, port)
+                if new_entry is not None:
                     return check_project_result(ok(project=self._public(new_entry)))
                 # 只有端口还没放出来才重试；其它失败立刻回真实原因
                 if not retryable:
@@ -152,8 +151,9 @@ class Launcher(LauncherApi):
     def _spawn_locked(self, root, port):
         """起一个项目服务并等它写出端口文件。
 
-        返回 ``(started, entry, errors, retryable)``；``retryable`` 由子进程退出码
-        判断（``BIND_FAILED_EXIT`` = 端口没抢到、值得重试），不看日志文案。
+        返回 ``(entry, errors, retryable)``；``entry`` 为 None 表示没起来，
+        ``retryable`` 由子进程退出码判断（``BIND_FAILED_EXIT`` = 端口没抢到、
+        值得重试），不看日志文案。
         """
         TEMP_DIR.mkdir(parents=True, exist_ok=True)
         tag = uuid.uuid4().hex[:8]
@@ -187,7 +187,7 @@ class Launcher(LauncherApi):
             )
         except OSError as exc:
             _cleanup(port_file, log_path)
-            return False, None, [f"项目子进程启动失败：{exc}"], False
+            return None, [f"项目子进程启动失败：{exc}"], False
         finally:
             handle.close()
 
@@ -197,7 +197,6 @@ class Launcher(LauncherApi):
                 tail = _tail(log_path)
                 _cleanup(port_file, log_path)
                 return (
-                    False,
                     None,
                     [f"项目子进程提前退出（exit code {process.returncode}）", *tail],
                     process.returncode == BIND_FAILED_EXIT,
@@ -215,14 +214,13 @@ class Launcher(LauncherApi):
                     "log": log_path,
                 }
                 self._projects[_key(root)] = entry
-                return True, entry, [], False
+                return entry, [], False
             time.sleep(0.05)
 
         _terminate(process)
         tail = _tail(log_path)
         _cleanup(port_file, log_path)
         return (
-            False,
             None,
             [f"项目子进程 {START_TIMEOUT:.0f} 秒内没有写出端口文件", *tail],
             False,
@@ -311,7 +309,7 @@ class LauncherServer(ThreadingHTTPServer):
 
 class LauncherHandler(StudioHTTPHandler):
     server_version = f"Studio/{__version__}"
-    max_body = MAX_BODY
+    max_body = 1024 * 1024  # 1 MiB
 
     def _handle_get(self):
         url = urlsplit(self.path)

@@ -27,6 +27,7 @@
 """
 
 import argparse
+import errno
 import json
 import mimetypes
 import os
@@ -73,7 +74,6 @@ from .project import Project, ProjectError
 __all__ = ["EngineService", "StudioServer", "main"]
 
 WEB_DIR = Path(__file__).resolve().parent / "web"
-MAX_BODY = 16 * 1024 * 1024
 HINT_TEXT = "请先运行 python tools/build_web.py 构建前端"
 
 # 只覆盖 run；任何新接口若要临时改 os.environ，必须拿同一把锁
@@ -329,7 +329,7 @@ class StudioServer(ThreadingHTTPServer):
 
 class StudioHandler(StudioHTTPHandler):
     server_version = f"Studio/{__version__}"
-    max_body = MAX_BODY
+    max_body = 16 * 1024 * 1024  # 16 MiB
 
     # -- 路由 ------------------------------------------------------------
     def _handle_get(self):
@@ -601,7 +601,10 @@ def main(argv=None):
         )
     except OSError as exc:
         print(f"[启动失败] 无法监听 127.0.0.1:{args.port}：{exc}", file=sys.stderr)
-        return BIND_FAILED_EXIT
+        # 只有「端口已被占用」值得 launcher 重试；EMFILE/EACCES 等立刻失败
+        if exc.errno == errno.EADDRINUSE or getattr(exc, "winerror", None) == 10048:
+            return BIND_FAILED_EXIT
+        return 1
 
     _, port = server.server_address[:2]
     if port_file is not None:

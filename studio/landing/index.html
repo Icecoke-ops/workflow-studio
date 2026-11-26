@@ -700,6 +700,9 @@
       // file:// 等场景改不了地址栏，不影响关闭动作
     }
 
+    // 落地页的关闭动作能被任意页面用导航触发（?close=<root>），必须经用户确认才真的关
+    if (!window.confirm('关闭项目 ' + root + '？该项目里未保存的改动会丢失。')) return Promise.resolve()
+
     return post('/api/projects/close', { root: root }).then(function (payload) {
       if (!payload.ok) {
         reportErrors(payload)

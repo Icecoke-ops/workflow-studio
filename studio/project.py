@@ -103,6 +103,7 @@ class Project:
             raise ProjectError("路径不能为空")
         if not isinstance(text, str):
             raise ProjectError("写入内容必须是字符串")
+        _validate_parts(parts)
         path = self.resolve(rel)
         if path.is_dir():
             raise ProjectError(f"目标是目录，不能写入：{_display(parts)}")
@@ -136,6 +137,7 @@ class Project:
         parts = _rel_parts(rel)
         if not parts:
             raise ProjectError("路径不能为空")
+        _validate_parts(parts)
         path = self.resolve(rel)
         if _exists(path):
             raise ProjectError(f"已存在：{_display(parts)}")
@@ -163,7 +165,7 @@ class Project:
         try:
             target = source.with_name(new_name)
         except ValueError as exc:
-            raise ProjectError(f"新名字不合法：{new_name!r}（{exc}）") from None
+            raise ProjectError(f"名字不合法：{new_name!r}（{exc}）") from None
         target_parts = parts[:-1] + [new_name]
         if _exists(target):
             raise ProjectError(f"目标已存在：{_display(target_parts)}")
@@ -222,20 +224,26 @@ _RESERVED_NAMES = {
 
 
 def _validate_name(name):
-    """rename 的新名字：只接受 Windows 真能原样落盘的单段名字。"""
+    """只接受 Windows 能原样落盘的单段名字。"""
     if not isinstance(name, str) or not name:
-        raise ProjectError("新名字不能为空")
+        raise ProjectError("名字不能为空")
     if name in (".", "..") or "/" in name or "\\" in name:
-        raise ProjectError(f"新名字只能是单个名字：{name!r}")
+        raise ProjectError(f"名字只能是单个名字：{name!r}")
     if any(ch in _INVALID_NAME_CHARS for ch in name):
-        raise ProjectError(f"新名字含 Windows 非法字符：{name!r}")
+        raise ProjectError(f"名字含 Windows 非法字符：{name!r}")
     if any(ord(ch) < 32 or 0xD800 <= ord(ch) <= 0xDFFF for ch in name):
-        raise ProjectError(f"新名字含控制字符：{name!r}")
+        raise ProjectError(f"名字含控制字符：{name!r}")
     if name != name.rstrip(" ."):
-        raise ProjectError(f"新名字不能以点或空格结尾：{name!r}")
+        raise ProjectError(f"名字不能以点或空格结尾：{name!r}")
     if name.split(".", 1)[0].rstrip(" ").upper() in _RESERVED_NAMES:
-        raise ProjectError(f"新名字是 Windows 保留名：{name!r}")
+        raise ProjectError(f"名字是 Windows 保留名：{name!r}")
     return name
+
+
+def _validate_parts(parts):
+    """新建路径的每一段都必须是能原样落盘的名字，先校验再碰盘。"""
+    for part in parts:
+        _validate_name(part)
 
 
 def _inside(root, target):

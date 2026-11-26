@@ -15,9 +15,7 @@ def ok(**extra):
 
 
 def fail(errors, **extra):
-    """失败信封；errors 可以给单条字符串。"""
-    if isinstance(errors, str):
-        errors = [errors]
+    """失败信封。"""
     return {"ok": False, "errors": list(errors), **extra}
 
 
@@ -38,6 +36,13 @@ class StudioHTTPHandler(BaseHTTPRequestHandler):
     def do_POST(self):
         self._dispatch(self._handle_post)
 
+    def handle_one_request(self):
+        """对端在读请求阶段就 RST 也是正常断线，别让 socketserver 打整栈。"""
+        try:
+            super().handle_one_request()
+        except (BrokenPipeError, ConnectionResetError):
+            self.close_connection = True
+
     def _handle_get(self):
         raise NotImplementedError
 
@@ -48,9 +53,9 @@ class StudioHTTPHandler(BaseHTTPRequestHandler):
         raise NotImplementedError
 
     def _dispatch(self, handler):
-        if not self._guard():
-            return
         try:
+            if not self._guard():
+                return
             handler()
         except (BrokenPipeError, ConnectionResetError):
             pass
