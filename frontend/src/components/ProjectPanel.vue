@@ -2,7 +2,7 @@
 import { computed, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import ContextMenu from './ContextMenu.vue'
-import { deletePath, fetchTree, makeDir, renamePath, writeFile } from '../api'
+import { deletePath, fetchTree, makeDir, payloadErrors, renamePath, writeFile } from '../api'
 import { joinPath, newFlowText, normalizePath, parentPath, titleFromPath } from '../documents'
 
 const props = defineProps({
@@ -13,7 +13,6 @@ const emit = defineEmits(['open', 'collapse', 'renamed', 'deleted'])
 
 const NAME_PATTERN = /^[^\\/:*?"<>|]+$/
 
-const treeRef = ref(null)
 const version = ref(0)
 const menu = ref(null)
 let menuSeq = 0
@@ -30,11 +29,6 @@ watch(
   },
 )
 
-function failMessage(data) {
-  const errors = data && Array.isArray(data.errors) ? data.errors.filter(Boolean) : []
-  return errors.join('；') || '操作失败'
-}
-
 /** el-tree 懒加载：根节点是项目名，其余按展开时请求一层。 */
 async function loadNode(node, resolve) {
   if (node.level === 0) {
@@ -43,7 +37,7 @@ async function loadNode(node, resolve) {
   }
   try {
     const data = await fetchTree(node.data?.path ?? '')
-    if (data.ok === false) throw new Error(failMessage(data))
+    if (data.ok === false) throw new Error(payloadErrors(data, '操作失败'))
     resolve(sortEntries(data.entries || []))
   } catch (err) {
     ElMessage.error(`读取目录失败：${err.message}`)
@@ -119,7 +113,7 @@ async function promptName(title, value) {
 /** 目标目录下有没有同名条目：新建前先查一次，别让 /api/file 静默覆盖没展开的旧文件。 */
 async function nameTaken(dirPath, name) {
   const data = await fetchTree(dirPath)
-  if (data.ok === false) throw new Error(failMessage(data))
+  if (data.ok === false) throw new Error(payloadErrors(data, '操作失败'))
   const lower = name.toLowerCase()
   return (data.entries || []).some((entry) => entry.name.toLowerCase() === lower)
 }
@@ -140,7 +134,7 @@ async function createFlow(dir, node) {
       return
     }
     const data = await writeFile(path, newFlowText(titleFromPath(path)))
-    if (data.ok === false) throw new Error(failMessage(data))
+    if (data.ok === false) throw new Error(payloadErrors(data, '操作失败'))
     refreshNode(node)
     emit('open', path)
   } catch (err) {
@@ -162,7 +156,7 @@ async function createFolder(dir, node) {
       return
     }
     const data = await makeDir(joinPath(dir.path, name))
-    if (data.ok === false) throw new Error(failMessage(data))
+    if (data.ok === false) throw new Error(payloadErrors(data, '操作失败'))
     refreshNode(node)
   } catch (err) {
     ElMessage.error(`新建文件夹失败：${err.message}`)
@@ -179,7 +173,7 @@ async function renameEntry(entry, node) {
   if (!name || name === entry.name) return
   try {
     const data = await renamePath(entry.path, name)
-    if (data.ok === false) throw new Error(failMessage(data))
+    if (data.ok === false) throw new Error(payloadErrors(data, '操作失败'))
     const to = normalizePath(data.path || joinPath(parentPath(entry.path), name))
     refreshNode(node.parent)
     emit('renamed', { from: entry.path, to })
@@ -200,7 +194,7 @@ async function removeEntry(entry, node) {
   }
   try {
     const data = await deletePath(entry.path)
-    if (data.ok === false) throw new Error(failMessage(data))
+    if (data.ok === false) throw new Error(payloadErrors(data, '操作失败'))
     refreshNode(node.parent)
     emit('deleted', entry.path)
   } catch (err) {
@@ -230,7 +224,6 @@ async function removeEntry(entry, node) {
     <el-tree
       v-else
       :key="version"
-      ref="treeRef"
       class="project-tree"
       :props="{ label: 'name', isLeaf: 'isLeaf' }"
       :load="loadNode"

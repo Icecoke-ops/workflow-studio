@@ -495,10 +495,10 @@
       window.open(project.url, '_blank')
     })
     var closeButton = button(busy === 'close' ? '关闭中…' : '关闭', 'danger', function () {
-      closeProject(project)
+      runProjectAction(project, 'close', '/api/projects/close', '已关闭')
     })
     var restartButton = button(busy === 'restart' ? '重启中…' : '重启', '', function () {
-      restartProject(project)
+      runProjectAction(project, 'restart', '/api/projects/restart', '已重启')
     })
     if (busy) {
       openButton.disabled = true
@@ -518,30 +518,16 @@
     renderProjects()
   }
 
-  function closeProject(project) {
+  function runProjectAction(project, label, path, doneText) {
     if (state.busy[project.root]) return
-    setBusy(project.root, 'close')
-    return post('/api/projects/close', { root: project.root }).then(function (payload) {
+    setBusy(project.root, label)
+    return post(path, { root: project.root }).then(function (payload) {
       setBusy(project.root, '')
       if (!payload.ok) {
         reportErrors(payload)
         return
       }
-      message('success', '已关闭「' + project.name + '」')
-      return loadProjects(true)
-    })
-  }
-
-  function restartProject(project) {
-    if (state.busy[project.root]) return
-    setBusy(project.root, 'restart')
-    return post('/api/projects/restart', { root: project.root }).then(function (payload) {
-      setBusy(project.root, '')
-      if (!payload.ok) {
-        reportErrors(payload)
-        return
-      }
-      message('success', '已重启「' + project.name + '」')
+      message('success', doneText + '「' + project.name + '」')
       return loadProjects(true)
     })
   }

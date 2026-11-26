@@ -29,6 +29,12 @@ async function request(path, options = {}) {
   return data ?? {}
 }
 
+/** 业务失败载荷（200 + ok:false）里的 errors 拼成人话；没有可用 errors 时用 fallback。 */
+export function payloadErrors(data, fallback = '接口返回失败') {
+  const errors = data && Array.isArray(data.errors) ? data.errors.filter(Boolean) : []
+  return errors.join('；') || fallback
+}
+
 /** ``std_1.0@table`` -> ``std@table``（与 engine.registry.short_type 一致）。 */
 function shortType(typeId) {
   if (!typeId) return '?'

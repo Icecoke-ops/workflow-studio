@@ -21,6 +21,7 @@ import {
   fetchHealth,
   fetchPlugins,
   fetchProject,
+  payloadErrors,
   runWorkflow,
   startDebugSession,
   stopDebugSession,
@@ -570,9 +571,11 @@ function applyWorkflow(raw) {
 
 // ---- 项目与文档 --------------------------------------------------------
 
-function fileErrors(data) {
-  const errors = data && Array.isArray(data.errors) ? data.errors.filter(Boolean) : []
-  return errors.join('；') || '接口返回失败'
+/** 项目为空或不可用：清掉顶栏项目信息和降级状态。 */
+function clearProject() {
+  project.value = null
+  projectDegraded.value = false
+  projectErrors.value = []
 }
 
 async function loadProject() {
@@ -580,17 +583,13 @@ async function loadProject() {
   try {
     data = await fetchProject()
   } catch (err) {
-    project.value = null
-    projectDegraded.value = false
-    projectErrors.value = []
+    clearProject()
     ElMessage.error(`读取项目失败：${err.message}`)
     return
   }
   const info = normalizeProject(data)
   if (!info) {
-    project.value = null
-    projectDegraded.value = false
-    projectErrors.value = []
+    clearProject()
     ElMessage.error('读取项目失败：后端没有返回项目根目录')
     return
   }
@@ -614,24 +613,16 @@ async function confirmDiscard() {
   }
 }
 
-/** 为多标签预留：切走前把当前画布快照进 doc（当前只允许一个文档，旧 doc 随后会被替换）。 */
-function snapshotActiveDoc() {
-  const doc = activeDoc.value
-  if (!doc || doc.kind !== 'flow') return
-  doc.workflow = buildWorkflow()
-}
-
 async function openDocument(rawPath) {
   const path = normalizePath(rawPath)
   if (!path || activeDoc.value?.path === path) return
   if (!(await confirmDiscard())) return
-  snapshotActiveDoc()
   await stopDebug()
 
   let file
   try {
     file = await fetchFile(path)
-    if (file.ok === false) throw new Error(fileErrors(file))
+    if (file.ok === false) throw new Error(payloadErrors(file))
   } catch (err) {
     ElMessage.error(`打开失败：${err.message}`)
     return
@@ -648,7 +639,9 @@ async function openDocument(rawPath) {
       ElMessage.error(`打开失败：${err.message}`)
       return
     }
-    const doc = { id: path, path, title: titleFromPath(path), kind: 'flow', savedSignature: '' }
+    // 签名取「载入完成」这一刻：下面还要等两帧，期间画布若被改动不能算进已保存
+    const signature = contentSignature.value
+    const doc = { id: path, path, title: titleFromPath(path), kind: 'flow', savedSignature: signature }
     docs.value = [doc]
     activeId.value = path
     await nextTick()
@@ -657,7 +650,6 @@ async function openDocument(rawPath) {
     // 新节点要等 ResizeObserver 量出尺寸；等两帧再 fitView，否则 0×0 会 no-op
     await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)))
     graphRef.value?.fitView?.({ padding: 0.2 })
-    doc.savedSignature = contentSignature.value
     return
   }
 
@@ -683,10 +675,12 @@ async function saveDocument() {
   }
   saving.value = true
   try {
-    const text = `${JSON.stringify(buildWorkflow(), null, 2)}\n`
-    const data = await writeFile(doc.path, text)
-    if (data.ok === false) throw new Error(fileErrors(data))
-    doc.savedSignature = contentSignature.value
+    // 签名和正文取同一份快照：await 期间用户再拖节点/改配置，那些改动没写进文件，不能标成已保存
+    const workflow = buildWorkflow()
+    const signature = JSON.stringify(workflow)
+    const data = await writeFile(doc.path, `${JSON.stringify(workflow, null, 2)}\n`)
+    if (data.ok === false) throw new Error(payloadErrors(data))
+    doc.savedSignature = signature
     ElMessage.success(`已保存 ${doc.title}`)
   } catch (err) {
     ElMessage.error(`保存失败：${err.message}`)
@@ -861,10 +855,7 @@ async function startDebug() {
     started = await startDebugSession(buildWorkflow())
     // Studio 启动失败是 200 + ok:false，errors 里带原因和子进程 stderr 尾部，原样透给用户
     if (started?.ok === false || !started?.session || !started?.port || !started?.token) {
-      const detail = Array.isArray(started?.errors) && started.errors.length
-        ? started.errors.join('；')
-        : '调试服务返回的会话信息不完整'
-      throw new Error(detail)
+      throw new Error(payloadErrors(started, '调试服务返回的会话信息不完整'))
     }
     const client = new DebugClient({
       port: started.port,
@@ -978,7 +969,7 @@ async function loadPlugins() {
       })
     typeColors.value = colors
   } catch (err) {
-    ElMessage.error(`加载插件失败：${err.message}（确认后端已在 8765 启动）`)
+    ElMessage.error(`加载插件失败：${err.message}（确认项目服务仍在运行）`)
   }
 }
 

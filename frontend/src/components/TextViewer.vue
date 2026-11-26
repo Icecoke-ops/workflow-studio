@@ -13,7 +13,7 @@ function formatSize(size) {
 }
 
 const notice = computed(() => {
-  if (props.doc.fileKind === 'binary') return '这是二进制文件，不能以文本方式显示。'
+  if (props.doc.fileKind === 'binary') return '不是 UTF-8 文本（或含二进制数据），不能以文本方式显示。'
   if (props.doc.fileKind === 'too_large') {
     return `文件太大（${formatSize(props.doc.size)}），不在浏览器里打开。`
   }
