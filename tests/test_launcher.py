@@ -296,61 +296,17 @@ def case_dirs_bad_path(ctx):
     check(payload.get("ok") is False, f"文件（非目录）应 ok:false：{payload!r}")
 
 
-# ---- 用例：回环守卫 -----------------------------------------------------
+# ---- 用例：回环守卫（launcher 继承共享 _guard 的最小证明） ----------------
 
 def case_host_guard(ctx):
     status, raw = http_raw(ctx.port, "GET", "/api/health", {"Host": "evil.example"})
     payload = json.loads(raw.decode("utf-8"))
     check(status == 403 and payload["ok"] is False, f"Host: evil.example 应 403（{status}）")
-    for host in (f"127.0.0.1:{ctx.port}", f"localhost:{ctx.port}"):
-        status, raw = http_raw(ctx.port, "GET", "/api/health", {"Host": host})
-        body = json.loads(raw.decode("utf-8"))
-        check(status == 200 and body["ok"] is True, f"Host: {host} 应 200（{status}）")
     status, raw = http_raw(
-        ctx.port, "GET", "/api/health", {"Host": f"localhost:{ctx.port + 1}"}
+        ctx.port, "GET", "/api/health", {"Host": f"127.0.0.1:{ctx.port}"}
     )
-    check(status == 403, f"Host 端口不符应 403（{status}）")
-
-
-def case_origin_guard(ctx):
-    missing = str(ctx.temp / "never-opened")
-    status, raw = http_raw(
-        ctx.port,
-        "POST",
-        "/api/projects/close",
-        {"Origin": "http://evil.example"},
-        {"root": missing},
-    )
-    payload = json.loads(raw.decode("utf-8"))
-    check(status == 403 and payload["ok"] is False, f"跨源 Origin 应 403（{status}）")
-    check(
-        not any("项目未运行" in item for item in payload["errors"]),
-        f"跨源请求不应进入业务逻辑：{payload['errors']}",
-    )
-    status, raw = http_raw(
-        ctx.port, "POST", "/api/projects/close", None, {"root": missing}
-    )
-    payload = json.loads(raw.decode("utf-8"))
-    check(
-        status == 200
-        and payload["ok"] is False
-        and any("项目未运行" in item for item in payload["errors"]),
-        f"无 Origin 应过守卫并回「项目未运行」：{status} / {payload}",
-    )
-    status, raw = http_raw(
-        ctx.port,
-        "POST",
-        "/api/projects/close",
-        {"Origin": f"http://127.0.0.1:{ctx.port}"},
-        {"root": missing},
-    )
-    payload = json.loads(raw.decode("utf-8"))
-    check(
-        status == 200
-        and payload["ok"] is False
-        and any("项目未运行" in item for item in payload["errors"]),
-        f"同源 Origin 应过守卫：{status} / {payload}",
-    )
+    body = json.loads(raw.decode("utf-8"))
+    check(status == 200 and body["ok"] is True, f"本机本端口 Host 应 200（{status}）")
 
 
 # ---- 用例：项目生命周期 -------------------------------------------------
@@ -675,7 +631,6 @@ CASES = [
     ("dirs 盘符根 parent 为 null", case_dirs_drive_root),
     ("dirs 不存在/非目录回 400", case_dirs_bad_path),
     ("launcher Host 守卫：只认本机本端口", case_host_guard),
-    ("launcher Origin 守卫：跨源 403、同源放行", case_origin_guard),
     ("项目打开：形状与子进程 health", case_open_project),
     ("项目子进程 /api/project 的 root 一致", case_child_project_info),
     ("同一 path 再开复用 pid/port", case_same_path_reuses_process),

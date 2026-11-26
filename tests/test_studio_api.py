@@ -1,9 +1,7 @@
-"""Studio 服务自检：同一进程里起 StudioServer（部分链路起真实子进程），用 urllib 打 12 个接口并断言。
+"""Studio 服务自检：同一进程里起 StudioServer（部分链路起真实子进程），用 urllib 打 Studio 服务的全部接口并断言。
 
     python tests/test_studio_api.py
 
-12 个接口路径：health / plugins / project / tree / file（GET+POST）/ validate / run /
-debug start / debug stop / mkdir / rename / delete。
 插件临时打到系统临时目录，跑完清理，不往仓库里丢东西。
 """
 
@@ -1382,6 +1380,65 @@ def main():
                 f"盘符根内的路径应解析成功：{resolved}",
             )
             expect_raises(ProjectError, lambda: drive.resolve(".."), "路径不能包含 ..")
+
+        # 31g) 新建路径名字规则：mkdir/write 复用 rename 的逐段校验，坏名字不落盘
+        status, _, body = api.json("/api/mkdir", {"path": "foo."})
+        check(
+            status == 200
+            and body["ok"] is False
+            and any("点或空格结尾" in item for item in body["errors"]),
+            f"mkdir 拒绝尾点名字：{body}",
+        )
+        status, _, body = api.json("/api/file", {"path": "w.", "text": "x"})
+        check(
+            status == 200
+            and body["ok"] is False
+            and any("点或空格结尾" in item for item in body["errors"]),
+            f"write 拒绝尾点名字：{body}",
+        )
+        status, _, body = api.json("/api/file", {"path": "x ", "text": "x"})
+        check(
+            status == 200
+            and body["ok"] is False
+            and any("点或空格结尾" in item for item in body["errors"]),
+            f"write 拒绝尾空格名字：{body}",
+        )
+        status, _, body = api.json("/api/file", {"path": "CON.txt", "text": "x"})
+        check(
+            status == 200
+            and body["ok"] is False
+            and any("保留名" in item for item in body["errors"]),
+            f"write 拒绝保留名：{body}",
+        )
+        status, _, body = api.json("/api/mkdir", {"path": "sub/NUL"})
+        check(
+            status == 200
+            and body["ok"] is False
+            and any("保留名" in item for item in body["errors"]),
+            f"mkdir 拒绝保留名：{body}",
+        )
+        names = set(os.listdir(workspace))
+        for bad in ("foo", "w", "x", "CON.txt"):
+            check(bad not in names, f"坏名字不应落盘：{bad!r}")
+
+        # 正常嵌套路径仍可用：父目录存在时逐段新建，写入字节一致
+        status, _, body = api.json("/api/mkdir", {"path": "nested"})
+        check(status == 200 and body["ok"] is True, f"mkdir nested：{body}")
+        status, _, body = api.json("/api/mkdir", {"path": "nested/dir"})
+        check(
+            status == 200 and body["ok"] is True and body["path"] == "nested/dir",
+            f"mkdir nested/dir：{body}",
+        )
+        status, _, body = api.json(
+            "/api/file", {"path": "nested/dir/a.txt", "text": "hi"}
+        )
+        check(
+            status == 200
+            and body["ok"] is True
+            and body["size"] == 2
+            and (workspace / "nested" / "dir" / "a.txt").read_bytes() == b"hi",
+            f"write nested/dir/a.txt：{body}",
+        )
 
         # 32) 项目 plugins 里的非插件 zip：skipped 一条、source=project、ok:true
         skipped_project = temp / "skipped_project"
