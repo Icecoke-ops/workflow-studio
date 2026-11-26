@@ -109,7 +109,10 @@ class Project:
         parent = path.parent
         if not parent.is_dir():
             raise ProjectError(f"父目录不存在：{_parent_display(parts)}")
-        data = text.encode("utf-8")
+        try:
+            data = text.encode("utf-8")
+        except UnicodeEncodeError:
+            raise ProjectError("文本不是合法 UTF-8") from None
         try:
             fd, temporary = tempfile.mkstemp(
                 dir=str(parent), prefix=".studio-", suffix=".tmp"
@@ -153,14 +156,14 @@ class Project:
         parts = _rel_parts(rel)
         if not parts:
             raise ProjectError("不能重命名项目根")
-        if not isinstance(new_name, str) or not new_name:
-            raise ProjectError("新名字不能为空")
-        if new_name in (".", "..") or "/" in new_name or "\\" in new_name:
-            raise ProjectError(f"新名字只能是单个名字：{new_name!r}")
+        new_name = _validate_name(new_name)
         source = self.resolve(rel)
         if not _exists(source):
             raise ProjectError(f"不存在：{_display(parts)}")
-        target = source.with_name(new_name)
+        try:
+            target = source.with_name(new_name)
+        except ValueError as exc:
+            raise ProjectError(f"新名字不合法：{new_name!r}（{exc}）") from None
         target_parts = parts[:-1] + [new_name]
         if _exists(target):
             raise ProjectError(f"目标已存在：{_display(target_parts)}")
@@ -207,11 +210,43 @@ def _rel_parts(rel):
     return parts
 
 
+_INVALID_NAME_CHARS = set('<>:"|?*')
+_RESERVED_NAMES = {
+    "CON",
+    "PRN",
+    "AUX",
+    "NUL",
+    *(f"COM{i}" for i in range(1, 10)),
+    *(f"LPT{i}" for i in range(1, 10)),
+}
+
+
+def _validate_name(name):
+    """rename 的新名字：只接受 Windows 真能原样落盘的单段名字。"""
+    if not isinstance(name, str) or not name:
+        raise ProjectError("新名字不能为空")
+    if name in (".", "..") or "/" in name or "\\" in name:
+        raise ProjectError(f"新名字只能是单个名字：{name!r}")
+    if any(ch in _INVALID_NAME_CHARS for ch in name):
+        raise ProjectError(f"新名字含 Windows 非法字符：{name!r}")
+    if any(ord(ch) < 32 or 0xD800 <= ord(ch) <= 0xDFFF for ch in name):
+        raise ProjectError(f"新名字含控制字符：{name!r}")
+    if name != name.rstrip(" ."):
+        raise ProjectError(f"新名字不能以点或空格结尾：{name!r}")
+    if name.split(".", 1)[0].rstrip(" ").upper() in _RESERVED_NAMES:
+        raise ProjectError(f"新名字是 Windows 保留名：{name!r}")
+    return name
+
+
 def _inside(root, target):
     """normcase 比较：挡住大小写差异、8.3 短名和符号链接绕出去。"""
     root_key = os.path.normcase(str(root))
     target_key = os.path.normcase(str(target))
-    return target_key == root_key or target_key.startswith(root_key + os.sep)
+    if target_key == root_key:
+        return True
+    # 盘符根的 normcase 已带尾分隔符（"c:\\"），再拼一个就成了 "c:\\\"，永远不匹配
+    prefix = root_key if root_key.endswith(os.sep) else root_key + os.sep
+    return target_key.startswith(prefix)
 
 
 def _exists(path):

@@ -22,6 +22,10 @@ class LauncherApi(ABC):
     """落地页后端的业务接口。"""
 
     @abstractmethod
+    def health(self) -> dict:
+        """launcher 存活检查。"""
+
+    @abstractmethod
     def projects(self) -> dict:
         """当前正在运行的项目进程。"""
 

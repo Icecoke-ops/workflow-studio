@@ -36,9 +36,9 @@ import time
 import traceback
 import urllib.request
 from http import HTTPStatus
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, unquote, urlsplit
+from urllib.parse import unquote, urlsplit
 
 from engine import __version__ as ENGINE_VERSION
 from engine import env as env_mod
@@ -50,7 +50,8 @@ from engine.runner import run
 from engine.typeid import qualify
 from engine.workflow import validate
 
-from . import __version__
+from . import BIND_FAILED_EXIT, __version__
+from ._http import HTML_TYPE, StudioHTTPHandler, fail, query_path
 from .contract import (
     ApiService,
     ContractError,
@@ -77,9 +78,6 @@ HINT_TEXT = "请先运行 python tools/build_web.py 构建前端"
 
 # 只覆盖 run；任何新接口若要临时改 os.environ，必须拿同一把锁
 _RUN_LOCK = threading.Lock()
-
-_JSON = "application/json; charset=utf-8"
-_HTML = "text/html; charset=utf-8"
 
 
 # ---- 业务层 ----
@@ -329,15 +327,9 @@ class StudioServer(ThreadingHTTPServer):
         super().server_close()
 
 
-class StudioHandler(BaseHTTPRequestHandler):
+class StudioHandler(StudioHTTPHandler):
     server_version = f"Studio/{__version__}"
-    timeout = 30
-
-    def do_GET(self):
-        self._dispatch(self._handle_get)
-
-    def do_POST(self):
-        self._dispatch(self._handle_post)
+    max_body = MAX_BODY
 
     # -- 路由 ------------------------------------------------------------
     def _handle_get(self):
@@ -351,9 +343,9 @@ class StudioHandler(BaseHTTPRequestHandler):
         elif path == "/api/project":
             self._send_json(HTTPStatus.OK, service.project())
         elif path == "/api/tree":
-            self._send_json(HTTPStatus.OK, service.tree(_query_path(url, "")))
+            self._send_json(HTTPStatus.OK, service.tree(query_path(url, "")))
         elif path == "/api/file":
-            rel = _query_path(url, None)
+            rel = query_path(url, None)
             if rel is None:
                 self._bad_request("缺少 path 查询参数")
                 return
@@ -445,58 +437,19 @@ class StudioHandler(BaseHTTPRequestHandler):
         else:
             self._send_json(HTTPStatus.OK, check_run(service.run(workflow)))
 
-    # -- 响应 ------------------------------------------------------------
-    def _dispatch(self, handler):
-        try:
-            handler()
-        except (BrokenPipeError, ConnectionResetError):
-            pass
-        except ProjectError as exc:
-            try:
-                self._send_json(
-                    HTTPStatus.OK, {"ok": False, "errors": [str(exc)]}
-                )
-            except Exception:
-                pass
-        except ContractError as exc:
-            try:
-                self._send_json(
-                    HTTPStatus.INTERNAL_SERVER_ERROR,
-                    {"ok": False, "errors": [str(exc)]},
-                )
-            except Exception:
-                pass
-        except Exception:
+    # -- 错误 ------------------------------------------------------------
+    def _on_error(self, exc):
+        if isinstance(exc, ProjectError):
+            self._send_json(HTTPStatus.OK, fail([str(exc)]))
+        elif isinstance(exc, ContractError):
+            self._send_json(HTTPStatus.INTERNAL_SERVER_ERROR, fail([str(exc)]))
+        else:
             traceback.print_exc()
-            try:
-                self._send_json(
-                    HTTPStatus.INTERNAL_SERVER_ERROR,
-                    {"ok": False, "errors": ["服务器内部错误"]},
-                )
-            except Exception:
-                pass
+            self._send_json(
+                HTTPStatus.INTERNAL_SERVER_ERROR, fail(["服务器内部错误"])
+            )
 
-    def _bad_request(self, message):
-        self._send_json(HTTPStatus.BAD_REQUEST, {"ok": False, "errors": [message]})
-
-    def _string_field(self, payload, key):
-        value = payload.get(key)
-        if not isinstance(value, str) or not value:
-            self._bad_request(f"请求体缺少 {key} 字符串")
-            return None
-        return value
-
-    def _send_json(self, status, payload):
-        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-        self._send_body(status, _JSON, body)
-
-    def _send_body(self, status, content_type, body):
-        self.send_response(status)
-        self.send_header("Content-Type", content_type)
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
-
+    # -- 静态资源 --------------------------------------------------------
     def _send_file(self, path):
         ctype = mimetypes.guess_type(str(path))[0] or "application/octet-stream"
         if ctype.startswith("text/") or ctype in (
@@ -522,43 +475,19 @@ class StudioHandler(BaseHTTPRequestHandler):
             '<p>API 已经可用，可以先看 <a href="/api/health">/api/health</a>。</p>'
             "</body></html>"
         ).encode("utf-8")
-        self._send_body(HTTPStatus.OK, _HTML, body)
+        self._send_body(HTTPStatus.OK, HTML_TYPE, body)
 
     def _serve_static(self, rel):
         rel = unquote(rel)
-        target = (self.server.web_dir / rel).resolve()
+        try:
+            target = (self.server.web_dir / rel).resolve()
+        except (OSError, ValueError):
+            self._not_found("/static/" + rel)
+            return
         if not target.is_relative_to(self.server.web_dir) or not target.is_file():
             self._not_found("/static/" + rel)
             return
         self._send_file(target)
-
-    def _not_found(self, path):
-        self._send_json(HTTPStatus.NOT_FOUND, {"ok": False, "errors": [f"未知路径：{path}"]})
-
-    # -- 请求 ------------------------------------------------------------
-    def _read_json(self):
-        try:
-            length = int(self.headers.get("Content-Length") or 0)
-        except ValueError:
-            length = 0
-        if length > MAX_BODY:
-            self._send_json(
-                HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
-                {"ok": False, "errors": [f"请求体超过 {MAX_BODY} 字节"]},
-            )
-            return None
-        raw = self.rfile.read(length) if length > 0 else b""
-        try:
-            payload = json.loads(raw.decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError):
-            payload = None
-        if not isinstance(payload, dict):
-            self._send_json(
-                HTTPStatus.BAD_REQUEST,
-                {"ok": False, "errors": ["请求体不是合法 JSON"]},
-            )
-            return None
-        return payload
 
 
 # ---- 启动 ----
@@ -578,13 +507,10 @@ def _watch_launcher(server, launcher_url):
             with urllib.request.urlopen(url, timeout=WATCH_TIMEOUT) as response:
                 response.read()
             failures = 0
-        except OSError:
+        except Exception:  # 读不全（IncompleteRead）等也算一次失败，不能让线程死掉
+            traceback.print_exc()
             failures += 1
     server.shutdown()
-
-def _query_path(url, default):
-    values = parse_qs(url.query, keep_blank_values=True).get("path")
-    return default if values is None else values[0]
 
 
 def main(argv=None):
@@ -675,7 +601,7 @@ def main(argv=None):
         )
     except OSError as exc:
         print(f"[启动失败] 无法监听 127.0.0.1:{args.port}：{exc}", file=sys.stderr)
-        return 1
+        return BIND_FAILED_EXIT
 
     _, port = server.server_address[:2]
     if port_file is not None:

@@ -7,7 +7,6 @@
 """
 
 import argparse
-import json
 import os
 import subprocess
 import sys
@@ -17,11 +16,12 @@ import time
 import traceback
 import uuid
 from http import HTTPStatus
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import urlsplit
 
-from . import __version__
+from . import BIND_FAILED_EXIT, __version__
+from ._http import HTML_TYPE, StudioHTTPHandler, fail, ok, query_path
 from .launcher_contract import (
     LauncherApi,
     LauncherError,
@@ -41,9 +41,6 @@ RESTART_ATTEMPTS = 10
 RESTART_DELAY = 0.1
 MAX_BODY = 1024 * 1024
 
-_JSON = "application/json; charset=utf-8"
-_HTML = "text/html; charset=utf-8"
-
 
 class Launcher(LauncherApi):
     def __init__(self, base_url=None):
@@ -53,13 +50,13 @@ class Launcher(LauncherApi):
 
     # -- 业务 ------------------------------------------------------------
     def health(self):
-        return check_health({"ok": True})
+        return check_health({"ok": True})  # 落地页只认 {"ok": true} 这个最小形状
 
     def projects(self):
         with self._lock:
             self._prune_locked()
             entries = [self._public(item) for item in self._projects.values()]
-        return check_projects({"ok": True, "errors": [], "projects": entries})
+        return check_projects(ok(projects=entries))
 
     def open_project(self, path):
         root = str(Path(path).resolve())
@@ -67,51 +64,41 @@ class Launcher(LauncherApi):
             self._prune_locked()
             entry = self._projects.get(_key(root))
             if entry is not None:
-                return check_project_result(
-                    {"ok": True, "errors": [], "project": self._public(entry)}
-                )
-            ok, entry, errors = self._spawn_locked(root, None)
-        if not ok:
-            return check_project_result({"ok": False, "errors": errors, "project": None})
-        return check_project_result(
-            {"ok": True, "errors": [], "project": self._public(entry)}
-        )
+                return check_project_result(ok(project=self._public(entry)))
+            started, entry, errors, _ = self._spawn_locked(root, None)
+        if not started:
+            return check_project_result(fail(errors, project=None))
+        return check_project_result(ok(project=self._public(entry)))
 
     def close_project(self, root):
         with self._lock:
             entry = self._projects.pop(_key(root), None)
             if entry is None:
-                return check_close(
-                    {"ok": False, "errors": [f"项目未运行：{root}"]}
-                )
+                return check_close(fail([f"项目未运行：{root}"]))
             self._stop_locked(entry)
-        return check_close({"ok": True, "errors": []})
+        return check_close(ok())
 
     def restart_project(self, root):
         with self._lock:
             entry = self._projects.pop(_key(root), None)
             if entry is None:
                 return check_project_result(
-                    {"ok": False, "errors": [f"项目未运行：{root}"], "project": None}
+                    fail([f"项目未运行：{root}"], project=None)
                 )
             port = entry["port"]
             path = entry["root"]
             self._stop_locked(entry)
             for attempt in range(RESTART_ATTEMPTS):
-                ok, new_entry, errors = self._spawn_locked(path, port)
-                if ok:
-                    return check_project_result(
-                        {"ok": True, "errors": [], "project": self._public(new_entry)}
-                    )
-                # 只有「端口还没放出来」才重试；其它失败立刻回真实原因
-                if not any("无法监听" in item for item in errors):
-                    return check_project_result(
-                        {"ok": False, "errors": errors, "project": None}
-                    )
+                started, new_entry, errors, retryable = self._spawn_locked(path, port)
+                if started:
+                    return check_project_result(ok(project=self._public(new_entry)))
+                # 只有端口还没放出来才重试；其它失败立刻回真实原因
+                if not retryable:
+                    return check_project_result(fail(errors, project=None))
                 if attempt + 1 < RESTART_ATTEMPTS:
                     time.sleep(RESTART_DELAY)
             return check_project_result(
-                {"ok": False, "errors": ["端口被占用，重启失败"], "project": None}
+                fail(["端口被占用，重启失败"], project=None)
             )
 
     def dirs(self, path):
@@ -119,23 +106,19 @@ class Launcher(LauncherApi):
             if os.name == "nt":
                 drives = sorted(os.listdrives(), key=str.casefold)
                 return check_dirs(
-                    {
-                        "ok": True,
-                        "errors": [],
-                        "path": "",
-                        "parent": None,
-                        "entries": [
+                    ok(
+                        path="",
+                        parent=None,
+                        entries=[
                             {"name": drive.rstrip("\\/"), "path": drive}
                             for drive in drives
                         ],
-                    }
+                    )
                 )
             path = "/"
         target = Path(path)
         if not target.is_dir():
-            return check_dirs(
-                {"ok": False, "errors": [f"目录不存在或不是目录：{path}"]}
-            )
+            return check_dirs(fail([f"目录不存在或不是目录：{path}"]))
         entries = []
         try:
             with os.scandir(target) as scanned:
@@ -148,17 +131,15 @@ class Launcher(LauncherApi):
                     entries.append({"name": item.name, "path": item.path})
         except OSError as exc:
             return check_dirs(
-                {"ok": False, "errors": [f"无法读取目录 {path}：{exc.strerror or exc}"]}
+                fail([f"无法读取目录 {path}：{exc.strerror or exc}"])
             )
         entries.sort(key=lambda item: item["name"].casefold())
         return check_dirs(
-            {
-                "ok": True,
-                "errors": [],
-                "path": str(target),
-                "parent": _parent_of(target),
-                "entries": entries,
-            }
+            ok(
+                path=str(target),
+                parent=_parent_of(target),
+                entries=entries,
+            )
         )
 
     def shutdown(self):
@@ -169,7 +150,11 @@ class Launcher(LauncherApi):
 
     # -- 子进程 ----------------------------------------------------------
     def _spawn_locked(self, root, port):
-        """起一个项目服务并等它写出端口文件；返回 (ok, entry, errors)。"""
+        """起一个项目服务并等它写出端口文件。
+
+        返回 ``(started, entry, errors, retryable)``；``retryable`` 由子进程退出码
+        判断（``BIND_FAILED_EXIT`` = 端口没抢到、值得重试），不看日志文案。
+        """
         TEMP_DIR.mkdir(parents=True, exist_ok=True)
         tag = uuid.uuid4().hex[:8]
         port_file = TEMP_DIR / f"project_{tag}.port"
@@ -202,7 +187,7 @@ class Launcher(LauncherApi):
             )
         except OSError as exc:
             _cleanup(port_file, log_path)
-            return False, None, [f"项目子进程启动失败：{exc}"]
+            return False, None, [f"项目子进程启动失败：{exc}"], False
         finally:
             handle.close()
 
@@ -215,6 +200,7 @@ class Launcher(LauncherApi):
                     False,
                     None,
                     [f"项目子进程提前退出（exit code {process.returncode}）", *tail],
+                    process.returncode == BIND_FAILED_EXIT,
                 )
             text = _read_port_file(port_file)
             if text is not None:
@@ -229,7 +215,7 @@ class Launcher(LauncherApi):
                     "log": log_path,
                 }
                 self._projects[_key(root)] = entry
-                return True, entry, []
+                return True, entry, [], False
             time.sleep(0.05)
 
         _terminate(process)
@@ -239,6 +225,7 @@ class Launcher(LauncherApi):
             False,
             None,
             [f"项目子进程 {START_TIMEOUT:.0f} 秒内没有写出端口文件", *tail],
+            False,
         )
 
     def _stop_locked(self, entry):
@@ -307,11 +294,6 @@ def _parent_of(path):
     return None if parent == path else str(parent)
 
 
-def _query_path(url):
-    values = parse_qs(url.query, keep_blank_values=True).get("path")
-    return "" if values is None else values[0]
-
-
 # ---- 传输层 ------------------------------------------------------------
 
 class LauncherServer(ThreadingHTTPServer):
@@ -327,15 +309,9 @@ class LauncherServer(ThreadingHTTPServer):
         super().server_close()
 
 
-class LauncherHandler(BaseHTTPRequestHandler):
+class LauncherHandler(StudioHTTPHandler):
     server_version = f"Studio/{__version__}"
-    timeout = 30
-
-    def do_GET(self):
-        self._dispatch(self._handle_get)
-
-    def do_POST(self):
-        self._dispatch(self._handle_post)
+    max_body = MAX_BODY
 
     def _handle_get(self):
         url = urlsplit(self.path)
@@ -346,7 +322,7 @@ class LauncherHandler(BaseHTTPRequestHandler):
         elif path == "/api/projects":
             self._send_json(HTTPStatus.OK, service.projects())
         elif path == "/api/fs/dirs":
-            target = _query_path(url)
+            target = query_path(url)
             if target and not Path(target).is_dir():
                 self._bad_request(f"目录不存在或不是目录：{target}")
                 return
@@ -383,29 +359,15 @@ class LauncherHandler(BaseHTTPRequestHandler):
         else:
             self._send_json(HTTPStatus.OK, service.restart_project(value))
 
-    # -- 响应 ------------------------------------------------------------
-    def _dispatch(self, handler):
-        try:
-            handler()
-        except (BrokenPipeError, ConnectionResetError):
-            pass
-        except LauncherError as exc:
-            try:
-                self._send_json(
-                    HTTPStatus.INTERNAL_SERVER_ERROR,
-                    {"ok": False, "errors": [str(exc)]},
-                )
-            except Exception:
-                pass
-        except Exception:
+    # -- 错误 ------------------------------------------------------------
+    def _on_error(self, exc):
+        if isinstance(exc, LauncherError):
+            self._send_json(HTTPStatus.INTERNAL_SERVER_ERROR, fail([str(exc)]))
+        else:
             traceback.print_exc()
-            try:
-                self._send_json(
-                    HTTPStatus.INTERNAL_SERVER_ERROR,
-                    {"ok": False, "errors": ["服务器内部错误"]},
-                )
-            except Exception:
-                pass
+            self._send_json(
+                HTTPStatus.INTERNAL_SERVER_ERROR, fail(["服务器内部错误"])
+            )
 
     def _serve_landing(self):
         try:
@@ -413,58 +375,10 @@ class LauncherHandler(BaseHTTPRequestHandler):
         except OSError:
             self._send_json(
                 HTTPStatus.SERVICE_UNAVAILABLE,
-                {"ok": False, "errors": ["落地页尚未构建：studio/landing/index.html"]},
+                fail(["落地页尚未构建：studio/landing/index.html"]),
             )
             return
-        self._send_body(HTTPStatus.OK, _HTML, body)
-
-    def _bad_request(self, message):
-        self._send_json(HTTPStatus.BAD_REQUEST, {"ok": False, "errors": [message]})
-
-    def _string_field(self, payload, key):
-        value = payload.get(key)
-        if not isinstance(value, str) or not value:
-            self._bad_request(f"请求体缺少 {key} 字符串")
-            return None
-        return value
-
-    def _send_json(self, status, payload):
-        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-        self._send_body(status, _JSON, body)
-
-    def _send_body(self, status, content_type, body):
-        self.send_response(status)
-        self.send_header("Content-Type", content_type)
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
-
-    def _not_found(self, path):
-        self._send_json(
-            HTTPStatus.NOT_FOUND, {"ok": False, "errors": [f"未知路径：{path}"]}
-        )
-
-    # -- 请求 ------------------------------------------------------------
-    def _read_json(self):
-        try:
-            length = int(self.headers.get("Content-Length") or 0)
-        except ValueError:
-            length = 0
-        if length > MAX_BODY:
-            self._send_json(
-                HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
-                {"ok": False, "errors": [f"请求体超过 {MAX_BODY} 字节"]},
-            )
-            return None
-        raw = self.rfile.read(length) if length > 0 else b""
-        try:
-            payload = json.loads(raw.decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError):
-            payload = None
-        if not isinstance(payload, dict):
-            self._bad_request("请求体不是合法 JSON")
-            return None
-        return payload
+        self._send_body(HTTPStatus.OK, HTML_TYPE, body)
 
 
 # ---- 启动 --------------------------------------------------------------
