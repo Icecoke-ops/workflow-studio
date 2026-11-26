@@ -1,12 +1,13 @@
-"""P2 自检：同一进程里起 StudioServer，用 urllib 打五个接口并断言。
+"""Studio 服务自检：同一进程里起 StudioServer（部分链路起真实子进程），用 urllib 打 12 个接口并断言。
 
     python tests/test_studio_api.py
 
+12 个接口路径：health / plugins / project / tree / file（GET+POST）/ validate / run /
+debug start / debug stop / mkdir / rename / delete。
 插件临时打到系统临时目录，跑完清理，不往仓库里丢东西。
 """
 
 import csv
-import ctypes
 import json
 import os
 import random
@@ -42,11 +43,20 @@ from studio.contract import (  # noqa: E402
     check_validate,
 )
 from studio.debug import DebugManager  # noqa: E402
-from studio.project import Project  # noqa: E402
+from studio.project import Project, ProjectError  # noqa: E402
 from studio.server import EngineService, StudioServer  # noqa: E402
 from websockets.sync.client import connect as ws_connect  # noqa: E402
 
-from _harness import DEMO_WORKFLOW  # noqa: E402
+from _harness import (  # noqa: E402
+    DEMO_WORKFLOW,
+    children_of,
+    expect_raises,
+    free_port,
+    http_raw,
+    port_open,
+    wait_pid_gone,
+    wait_port_closed,
+)
 
 DEMO = DEMO_WORKFLOW
 DEBUG_DIR = Path(tempfile.gettempdir()) / "workflow-studio"
@@ -62,12 +72,6 @@ def check(condition, message):
     print(f"[OK] {message}")
 
 
-def free_port():
-    with socket.socket() as sock:
-        sock.bind(("127.0.0.1", 0))
-        return sock.getsockname()[1]
-
-
 def wait_health(base, timeout=10.0):
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -77,100 +81,6 @@ def wait_health(base, timeout=10.0):
         except Exception:
             time.sleep(0.1)
     return None
-
-
-def port_open(port, timeout=0.3):
-    try:
-        with socket.create_connection(("127.0.0.1", port), timeout=timeout):
-            return True
-    except OSError:
-        return False
-
-
-def wait_port_closed(port, timeout=5.0):
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        if not port_open(port):
-            return True
-        time.sleep(0.1)
-    return False
-
-
-def pid_alive(pid):
-    """进程还在吗：Windows 用 OpenProcess 探测，其余平台 os.kill(pid, 0)。"""
-    if os.name != "nt":
-        try:
-            os.kill(pid, 0)
-            return True
-        except OSError:
-            return False
-    api = _winapi()
-    handle = api.OpenProcess(0x00100000, 0, pid)  # SYNCHRONIZE
-    if not handle:
-        return False
-    api.CloseHandle(handle)
-    return True
-
-
-def wait_pid_gone(pid, timeout=5.0):
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        if not pid_alive(pid):
-            return True
-        time.sleep(0.1)
-    return not pid_alive(pid)
-
-
-class PROCESSENTRY32(ctypes.Structure):
-    _fields_ = [
-        ("dwSize", ctypes.c_uint32),
-        ("cntUsage", ctypes.c_uint32),
-        ("th32ProcessID", ctypes.c_uint32),
-        ("th32DefaultHeapID", ctypes.c_void_p),
-        ("th32ModuleID", ctypes.c_uint32),
-        ("cntThreads", ctypes.c_uint32),
-        ("th32ParentProcessID", ctypes.c_uint32),
-        ("pcPriClassBase", ctypes.c_long),
-        ("dwFlags", ctypes.c_uint32),
-        ("szExeFile", ctypes.c_char * 260),
-    ]
-
-
-def _winapi():
-    """kernel32 签名；不设 restype 的话 64 位句柄会被截断。"""
-    api = ctypes.WinDLL("kernel32", use_last_error=True)
-    api.CreateToolhelp32Snapshot.argtypes = (ctypes.c_uint32, ctypes.c_uint32)
-    api.CreateToolhelp32Snapshot.restype = ctypes.c_void_p
-    api.Process32First.argtypes = (ctypes.c_void_p, ctypes.c_void_p)
-    api.Process32First.restype = ctypes.c_int
-    api.Process32Next.argtypes = (ctypes.c_void_p, ctypes.c_void_p)
-    api.Process32Next.restype = ctypes.c_int
-    api.OpenProcess.argtypes = (ctypes.c_uint32, ctypes.c_int, ctypes.c_uint32)
-    api.OpenProcess.restype = ctypes.c_void_p
-    api.CloseHandle.argtypes = (ctypes.c_void_p,)
-    return api
-
-
-def children_of(parent_pid):
-    """父进程的直接子进程（Windows Toolhelp 快照；WMI 在沙箱里被禁）。"""
-    if os.name != "nt":
-        return []
-    api = _winapi()
-    snapshot = api.CreateToolhelp32Snapshot(0x00000002, 0)  # TH32CS_SNAPPROCESS
-    if not snapshot or snapshot == ctypes.c_void_p(-1).value:
-        return []
-    entry = PROCESSENTRY32()
-    entry.dwSize = ctypes.sizeof(entry)
-    found = []
-    try:
-        ok = api.Process32First(snapshot, ctypes.byref(entry))
-        while ok:
-            if entry.th32ParentProcessID == parent_pid:
-                found.append(entry.th32ProcessID)
-            ok = api.Process32Next(snapshot, ctypes.byref(entry))
-    finally:
-        api.CloseHandle(snapshot)
-    return found
 
 
 class Api:
@@ -1344,6 +1254,134 @@ def main():
             status == 200 and body["ok"] is False,
             f"delete 根被拒：{body.get('errors')}",
         )
+
+        # 31b) rename 非法名字矩阵：全部 200 + ok:false，盘上不出现坏名字
+        source = workspace / "rename_src.txt"
+        source.write_text("x", encoding="utf-8")
+        bad_names = [
+            "a:b",
+            "a<b",
+            "a>b",
+            'a"b',
+            "a|b",
+            "a?b",
+            "a*b",
+            "a\tb",
+            "a.",
+            "a ",
+            "CON",
+            "con.txt",
+            "COM1",
+            "LPT9.txt",
+            "..",
+        ]
+        for bad in bad_names:
+            status, _, body = api.json(
+                "/api/rename", {"path": "rename_src.txt", "new_name": bad}
+            )
+            check(
+                status == 200 and body["ok"] is False and bool(body["errors"]),
+                f"rename 拒绝非法名字 {bad!r}：{body}",
+            )
+        listing = set(os.listdir(workspace))
+        for bad in bad_names:
+            check(bad not in listing, f"盘上不应出现坏名字 {bad!r}")
+        check(source.is_file(), "非法名失败后源文件仍在")
+        status, _, body = api.json(
+            "/api/rename", {"path": "rename_src.txt", "new_name": "renamed.txt"}
+        )
+        check(
+            status == 200
+            and body["ok"] is True
+            and body["path"] == "renamed.txt"
+            and (workspace / "renamed.txt").is_file()
+            and not source.exists(),
+            f"合法 rename 仍成功：{body}",
+        )
+        api.json("/api/delete", {"path": "renamed.txt"})
+
+        # 31c) 孤立代理项：200 + ok:false + 恰为「文本不是合法 UTF-8」，不落盘
+        status, _, body = api.json(
+            "/api/file", raw='{"path":"bad.txt","text":"\\ud800"}'
+        )
+        check(
+            status == 200
+            and body == {"ok": False, "errors": ["文本不是合法 UTF-8"]},
+            f"孤立代理项应被拒：{body}",
+        )
+        check(not (workspace / "bad.txt").exists(), "非法文本不能落盘")
+
+        # 31d) 静态路径里的 NUL：404 JSON 而不是 500
+        status, content_type, text = api.call("/static/%00")
+        check(
+            status == 404 and content_type.startswith("application/json"),
+            f"GET /static/%00 应 404 JSON（{status} / {content_type}）",
+        )
+        check(json.loads(text)["ok"] is False, "GET /static/%00 回 ok:false")
+        check("Traceback" not in text, "GET /static/%00 不打堆栈")
+
+        # 31e) Host / Origin 守卫
+        port = server.server_address[1]
+        status, raw_body = http_raw(port, "GET", "/api/health", {"Host": "evil.example"})
+        check(
+            status == 403 and json.loads(raw_body)["ok"] is False,
+            f"Host: evil.example 应 403（{status}）",
+        )
+        for host in (f"127.0.0.1:{port}", f"localhost:{port}"):
+            status, raw_body = http_raw(port, "GET", "/api/health", {"Host": host})
+            check(
+                status == 200 and json.loads(raw_body)["ok"] is True,
+                f"Host: {host} 应 200（{status}）",
+            )
+        status, raw_body = http_raw(
+            port, "GET", "/api/health", {"Host": f"localhost:{port + 1}"}
+        )
+        check(status == 403, f"Host 端口不符应 403（{status}）")
+
+        status, raw_body = http_raw(
+            port,
+            "POST",
+            "/api/mkdir",
+            {"Origin": "http://evil.example"},
+            {"path": "origin_evil_dir"},
+        )
+        check(
+            status == 403 and json.loads(raw_body)["ok"] is False,
+            f"跨源 Origin 应 403（{status}）",
+        )
+        check(not (workspace / "origin_evil_dir").exists(), "跨源 Origin 不能建目录")
+
+        status, raw_body = http_raw(
+            port,
+            "POST",
+            "/api/mkdir",
+            {"Origin": f"http://127.0.0.1:{port}"},
+            {"path": "origin_ok_dir"},
+        )
+        check(
+            status == 200 and json.loads(raw_body)["ok"] is True,
+            f"同源 Origin 应 200（{status}）",
+        )
+        check((workspace / "origin_ok_dir").is_dir(), "同源 Origin 的目录真的建出")
+
+        status, raw_body = http_raw(
+            port, "POST", "/api/mkdir", None, {"path": "no_origin_dir"}
+        )
+        check(
+            status == 200 and json.loads(raw_body)["ok"] is True,
+            f"无 Origin 应 200（{status}）",
+        )
+        check((workspace / "no_origin_dir").is_dir(), "无 Origin 的目录真的建出")
+
+        # 31f) 盘符根（仅 Windows，只读）：根内路径可解析，.. 仍拒绝
+        if os.name == "nt" and Path("C:\\").is_dir():
+            drive = Project("C:\\")
+            resolved = drive.resolve("Windows")
+            check(
+                resolved.is_relative_to(Path("C:\\")),
+                f"盘符根内的路径应解析成功：{resolved}",
+            )
+            expect_raises(ProjectError, lambda: drive.resolve(".."), "路径不能包含 ..")
 
         # 32) 项目 plugins 里的非插件 zip：skipped 一条、source=project、ok:true
         skipped_project = temp / "skipped_project"

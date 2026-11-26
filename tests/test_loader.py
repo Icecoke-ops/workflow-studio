@@ -45,7 +45,7 @@ def case_good_plugin_loads():
     with tempfile.TemporaryDirectory(prefix="engine_loader_test_") as tmp:
         zip_path = write_zip(tmp, "ldp0.zip", plugin_files("ldp0"))
         check(find_zips(tmp) == [zip_path], f"find_zips 结果不对：{find_zips(tmp)}")
-        info = load_plugin(zip_path, set())
+        info = load_plugin(zip_path, {})
         check(info.name == "ldp0", f"插件名不对：{info.name!r}")
         check(info.version == "1.0", f"版本不对：{info.version!r}")
         check(info.title == "测试插件", f"标题不对：{info.title!r}")
@@ -54,24 +54,24 @@ def case_good_plugin_loads():
 
 
 def case_real_plugins_load():
-    core = load_plugin(ROOT / "plugins" / "core.zip", set())
+    core = load_plugin(ROOT / "plugins" / "core.zip", {})
     check(core.name == "core", f"core.zip 插件名不对：{core.name!r}")
     check(core.version == "1.0", f"core.zip 版本不对：{core.version!r}")
     check(len(core.components) == 1, f"core 应有 1 个组件：{core.components}")
 
-    fileio = load_plugin(ROOT / "plugins" / "fileio.zip", set())
+    fileio = load_plugin(ROOT / "plugins" / "fileio.zip", {})
     check(fileio.name == "fileio", f"fileio.zip 插件名不对：{fileio.name!r}")
     check(len(fileio.components) == 5, f"fileio 应有 5 个组件：{fileio.components}")
 
-    table = load_plugin(ROOT / "plugins" / "table.zip", set())
+    table = load_plugin(ROOT / "plugins" / "table.zip", {})
     check(table.name == "table", f"table.zip 插件名不对：{table.name!r}")
     check(len(table.components) == 11, f"table 应有 11 个组件：{table.components}")
 
-    split = load_plugin(ROOT / "plugins" / "split.zip", set())
+    split = load_plugin(ROOT / "plugins" / "split.zip", {})
     check(split.name == "split", f"split.zip 插件名不对：{split.name!r}")
     check(len(split.components) == 2, f"split 应有 2 个组件：{split.components}")
 
-    ml = load_plugin(ROOT / "plugins" / "ml.zip", set())
+    ml = load_plugin(ROOT / "plugins" / "ml.zip", {})
     check(ml.name == "ml", f"ml.zip 插件名不对：{ml.name!r}")
     check(len(ml.components) == 8, f"ml 应有 8 个组件：{ml.components}")
 
@@ -92,7 +92,7 @@ def case_missing_init():
     with tempfile.TemporaryDirectory(prefix="engine_loader_test_") as tmp:
         entries = {"ldp1/components.py": plugin_source("ldp1")}
         zip_path = write_zip(tmp, "ldp1.zip", entries)
-        expect_raises(PluginLoadError, lambda: load_plugin(zip_path, set()), "缺少 __init__.py")
+        expect_raises(PluginLoadError, lambda: load_plugin(zip_path, {}), "缺少 __init__.py")
 
 
 def case_two_top_dirs():
@@ -105,7 +105,7 @@ def case_two_top_dirs():
         }
         zip_path = write_zip(tmp, "ldp2.zip", entries)
         expect_raises(
-            PluginLoadError, lambda: load_plugin(zip_path, set()), "顶层必须恰好一个插件目录"
+            PluginLoadError, lambda: load_plugin(zip_path, {}), "顶层必须恰好一个插件目录"
         )
 
 
@@ -113,7 +113,7 @@ def case_no_subdirectory():
     with tempfile.TemporaryDirectory(prefix="engine_loader_test_") as tmp:
         zip_path = write_zip(tmp, "ldp3.zip", {"ldp3.py": ""})
         expect_raises(
-            PluginLoadError, lambda: load_plugin(zip_path, set()), "顶层必须恰好一个插件目录"
+            PluginLoadError, lambda: load_plugin(zip_path, {}), "顶层必须恰好一个插件目录"
         )
 
 
@@ -121,7 +121,7 @@ def case_missing_components_py():
     with tempfile.TemporaryDirectory(prefix="engine_loader_test_") as tmp:
         zip_path = write_zip(tmp, "ldp4.zip", {"ldp4/__init__.py": ""})
         expect_raises(
-            PluginLoadError, lambda: load_plugin(zip_path, set()), "缺少 ldp4/components.py"
+            PluginLoadError, lambda: load_plugin(zip_path, {}), "缺少 ldp4/components.py"
         )
 
 
@@ -132,7 +132,7 @@ def case_root_level_py():
         zip_path = write_zip(tmp, "ldp5.zip", entries)
         expect_raises(
             PluginLoadError,
-            lambda: load_plugin(zip_path, set()),
+            lambda: load_plugin(zip_path, {}),
             "必须放在",
             "ldp5/",
             "stray.py",
@@ -148,7 +148,7 @@ def case_plugin_name_missing():
             {"ldp6/__init__.py": "", "ldp6/components.py": source},
         )
         expect_raises(
-            PluginLoadError, lambda: load_plugin(zip_path, set()), "PLUGIN_NAME 缺失或不合法"
+            PluginLoadError, lambda: load_plugin(zip_path, {}), "PLUGIN_NAME 缺失或不合法"
         )
 
 
@@ -157,7 +157,7 @@ def case_plugin_name_mismatch():
         zip_path = write_zip(tmp, "ldp7.zip", plugin_files("ldp7", name="other"))
         expect_raises(
             PluginLoadError,
-            lambda: load_plugin(zip_path, set()),
+            lambda: load_plugin(zip_path, {}),
             "必须与 zip 内目录名",
         )
 
@@ -166,7 +166,7 @@ def case_plugin_version_invalid():
     with tempfile.TemporaryDirectory(prefix="engine_loader_test_") as tmp:
         zip_path = write_zip(tmp, "ldp8.zip", plugin_files("ldp8", version="1"))
         expect_raises(
-            PluginLoadError, lambda: load_plugin(zip_path, set()), "PLUGIN_VERSION 缺失或不合法"
+            PluginLoadError, lambda: load_plugin(zip_path, {}), "PLUGIN_VERSION 缺失或不合法"
         )
 
 
@@ -177,7 +177,7 @@ def case_components_empty():
             tmp, "ldp9.zip", {"ldp9/__init__.py": "", "ldp9/components.py": source}
         )
         expect_raises(
-            PluginLoadError, lambda: load_plugin(zip_path, set()), "COMPONENTS 必须是非空列表"
+            PluginLoadError, lambda: load_plugin(zip_path, {}), "COMPONENTS 必须是非空列表"
         )
 
 
@@ -287,7 +287,7 @@ def case_missing_requirement():
         entries["ldp13/requirements.txt"] = "definitely_missing_pkg_xyz>=1.0\n"
         zip_path = write_zip(tmp, "ldp13.zip", entries)
         exc = expect_raises(
-            PluginLoadError, lambda: load_plugin(zip_path, set()), "pip install"
+            PluginLoadError, lambda: load_plugin(zip_path, {}), "pip install"
         )
         check(
             "definitely_missing_pkg_xyz" in str(exc),
@@ -300,7 +300,7 @@ def case_installed_requirement_ok():
         entries = plugin_files("ldp14")
         entries["ldp14/requirements.txt"] = "pandas\n"
         zip_path = write_zip(tmp, "ldp14.zip", entries)
-        info = load_plugin(zip_path, set())
+        info = load_plugin(zip_path, {})
         check(info.name == "ldp14", "已安装依赖时不应该报错")
 
 
@@ -311,7 +311,7 @@ def case_version_constraint_warning():
         zip_path = write_zip(tmp, "ldp34.zip", entries)
         err = io.StringIO()
         with redirect_stderr(err):
-            info = load_plugin(zip_path, set())
+            info = load_plugin(zip_path, {})
         text = err.getvalue()
     check(info.name == "ldp34", "带版本约束但依赖已安装时应能加载")
     check("只检查是否已安装" in text, f"stderr 缺少版本说明：{text!r}")
@@ -335,7 +335,7 @@ def case_plugin_own_package_not_conflict():
     """插件自己挂上 sys.path 后，不能再把自己的包名当成「已安装模块」拒绝。"""
     with tempfile.TemporaryDirectory(prefix="engine_loader_test_") as tmp:
         zip_path = write_zip(tmp, "ldp37.zip", plugin_files("ldp37"))
-        load_plugin(zip_path, set())  # 直接加载会顺手把该 zip 挂到 sys.path
+        load_plugin(zip_path, {})  # 直接加载会顺手把该 zip 挂到 sys.path
         registry = Registry().load(tmp)
     check("ldp37" in registry.plugins, f"自身包名不应冲突：{sorted(registry.plugins)}")
 
@@ -348,7 +348,7 @@ def case_root_level_bytecode_rejected():
         zip_path = write_zip(tmp, "ldp38.zip", entries)
         expect_raises(
             PluginLoadError,
-            lambda: load_plugin(zip_path, set()),
+            lambda: load_plugin(zip_path, {}),
             "源码/字节码",
             "ldp38/",
             "x.pyc",
@@ -393,7 +393,7 @@ def case_plugin_title_not_string():
             "ldp35.zip",
             {"ldp35/__init__.py": "", "ldp35/components.py": source},
         )
-        expect_raises(PluginLoadError, lambda: load_plugin(zip_path, set()), "PLUGIN_TITLE")
+        expect_raises(PluginLoadError, lambda: load_plugin(zip_path, {}), "PLUGIN_TITLE")
 
 
 def case_component_title_not_string():
@@ -469,7 +469,7 @@ def case_types_py_broken_import():
         zip_path = write_zip(tmp, "ldp18.zip", entries)
         expect_raises(
             PluginLoadError,
-            lambda: load_plugin(zip_path, set()),
+            lambda: load_plugin(zip_path, {}),
             "types.py",
             "definitely_missing_module_xyz",
         )
@@ -480,7 +480,7 @@ def case_zip_name_mismatch():
         zip_path = write_zip(tmp, "wrong_name.zip", plugin_files("ldp19"))
         expect_raises(
             PluginLoadError,
-            lambda: load_plugin(zip_path, set()),
+            lambda: load_plugin(zip_path, {}),
             "文件名主干必须是插件名",
         )
 
@@ -505,7 +505,7 @@ def case_types_py_syntax_error():
         entries = plugin_files("ldp21")
         entries["ldp21/types.py"] = "def broken(\n"
         zip_path = write_zip(tmp, "ldp21.zip", entries)
-        expect_raises(PluginLoadError, lambda: load_plugin(zip_path, set()), "types.py")
+        expect_raises(PluginLoadError, lambda: load_plugin(zip_path, {}), "types.py")
 
 
 def case_schema_method_raises():
@@ -533,7 +533,7 @@ def case_macos_junk_ignored():
         entries["__MACOSX/ldp23/._components.py"] = "junk"
         entries["ldp23/._components.py"] = "junk"
         zip_path = write_zip(tmp, "ldp23.zip", entries)
-        info = load_plugin(zip_path, set())
+        info = load_plugin(zip_path, {})
         check(info.name == "ldp23", "带 __MACOSX / ._ 垃圾文件的 zip 应正常加载")
 
 
@@ -565,7 +565,7 @@ def case_std_namespace_rejected():
         write_zip(tmp, "std.zip", {"std/__init__.py": "", "std/components.py": source})
         expect_raises(
             PluginLoadError,
-            lambda: load_plugin(Path(tmp) / "std.zip", set()),
+            lambda: load_plugin(Path(tmp) / "std.zip", {}),
             "保留的命名空间",
         )
 

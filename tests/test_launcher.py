@@ -7,7 +7,6 @@
 所有子进程、端口和临时目录在 main() 的 finally 里清干净。
 """
 
-import ctypes
 import json
 import os
 import shutil
@@ -35,83 +34,21 @@ from studio.launcher_contract import (  # noqa: E402
     check_projects,
 )
 
-from _harness import check, run_cases  # noqa: E402
+from _harness import (  # noqa: E402
+    check,
+    expect_raises,
+    free_port,
+    http_raw,
+    kill_pid,
+    pid_alive,
+    port_open,
+    run_cases,
+    wait_until,
+)
 
 START_TIMEOUT = 20.0
 ORPHAN_TIMEOUT = 45.0
 STUDIO_TEMP = Path(tempfile.gettempdir()) / "workflow-studio"
-
-
-# ---- 进程 / 端口 --------------------------------------------------------
-
-def _winapi():
-    """kernel32 签名；不设 restype 的话 64 位句柄会被截断。"""
-    api = ctypes.WinDLL("kernel32", use_last_error=True)
-    api.OpenProcess.argtypes = (ctypes.c_uint32, ctypes.c_int, ctypes.c_uint32)
-    api.OpenProcess.restype = ctypes.c_void_p
-    api.GetExitCodeProcess.argtypes = (ctypes.c_void_p, ctypes.POINTER(ctypes.c_ulong))
-    api.GetExitCodeProcess.restype = ctypes.c_int
-    api.TerminateProcess.argtypes = (ctypes.c_void_p, ctypes.c_uint)
-    api.CloseHandle.argtypes = (ctypes.c_void_p,)
-    return api
-
-
-def pid_alive(pid):
-    """进程还在吗：Windows 用 GetExitCodeProcess，其余平台 os.kill(pid, 0)。"""
-    if os.name != "nt":
-        try:
-            os.kill(pid, 0)
-            return True
-        except OSError:
-            return False
-    api = _winapi()
-    handle = api.OpenProcess(0x1000, 0, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
-    if not handle:
-        return False
-    try:
-        code = ctypes.c_ulong()
-        if not api.GetExitCodeProcess(handle, ctypes.byref(code)):
-            return False
-        return code.value == 259  # STILL_ACTIVE
-    finally:
-        api.CloseHandle(handle)
-
-
-def kill_pid(pid):
-    if os.name != "nt":
-        try:
-            os.kill(pid, 9)
-        except OSError:
-            pass
-        return
-    api = _winapi()
-    handle = api.OpenProcess(0x0001, 0, pid)  # PROCESS_TERMINATE
-    if handle:
-        api.TerminateProcess(handle, 1)
-        api.CloseHandle(handle)
-
-
-def free_port():
-    with socket.socket() as sock:
-        sock.bind(("127.0.0.1", 0))
-        return sock.getsockname()[1]
-
-
-def port_open(port, timeout=0.3):
-    try:
-        with socket.create_connection(("127.0.0.1", port), timeout=timeout):
-            return True
-    except OSError:
-        return False
-
-
-def wait_until(predicate, timeout, interval=0.1):
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        if predicate():
-            return True
-        time.sleep(interval)
-    return predicate()
 
 
 # ---- HTTP ---------------------------------------------------------------
@@ -142,15 +79,6 @@ def _contract(checker, payload):
         return checker(payload)
     except LauncherError as exc:
         raise AssertionError(f"{checker.__name__} 拒绝了合法载荷：{exc}") from None
-
-
-def _must_raise(checker, payload, fragment):
-    try:
-        checker(payload)
-    except LauncherError as exc:
-        check(fragment in str(exc), f"错误信息应含 {fragment!r}，实际：{exc!r}")
-        return
-    raise AssertionError(f"{checker.__name__} 应拒绝畸形载荷 {payload!r}")
 
 
 # ---- 夹具 ---------------------------------------------------------------
@@ -258,7 +186,7 @@ def case_health(ctx):
         content_type == "application/json; charset=utf-8",
         f"health Content-Type 不对：{content_type!r}",
     )
-    check(payload == {"ok": True}, f"health 载荷不对：{payload!r}")
+    check(payload.get("ok") is True, f"health 载荷 ok 应为 true：{payload!r}")
     _contract(check_health, payload)
 
 
@@ -366,6 +294,63 @@ def case_dirs_bad_path(ctx):
     status, _, payload = http_json(ctx.base, query)
     check(status == 400, f"文件（非目录）应为 400，实际 {status}")
     check(payload.get("ok") is False, f"文件（非目录）应 ok:false：{payload!r}")
+
+
+# ---- 用例：回环守卫 -----------------------------------------------------
+
+def case_host_guard(ctx):
+    status, raw = http_raw(ctx.port, "GET", "/api/health", {"Host": "evil.example"})
+    payload = json.loads(raw.decode("utf-8"))
+    check(status == 403 and payload["ok"] is False, f"Host: evil.example 应 403（{status}）")
+    for host in (f"127.0.0.1:{ctx.port}", f"localhost:{ctx.port}"):
+        status, raw = http_raw(ctx.port, "GET", "/api/health", {"Host": host})
+        body = json.loads(raw.decode("utf-8"))
+        check(status == 200 and body["ok"] is True, f"Host: {host} 应 200（{status}）")
+    status, raw = http_raw(
+        ctx.port, "GET", "/api/health", {"Host": f"localhost:{ctx.port + 1}"}
+    )
+    check(status == 403, f"Host 端口不符应 403（{status}）")
+
+
+def case_origin_guard(ctx):
+    missing = str(ctx.temp / "never-opened")
+    status, raw = http_raw(
+        ctx.port,
+        "POST",
+        "/api/projects/close",
+        {"Origin": "http://evil.example"},
+        {"root": missing},
+    )
+    payload = json.loads(raw.decode("utf-8"))
+    check(status == 403 and payload["ok"] is False, f"跨源 Origin 应 403（{status}）")
+    check(
+        not any("项目未运行" in item for item in payload["errors"]),
+        f"跨源请求不应进入业务逻辑：{payload['errors']}",
+    )
+    status, raw = http_raw(
+        ctx.port, "POST", "/api/projects/close", None, {"root": missing}
+    )
+    payload = json.loads(raw.decode("utf-8"))
+    check(
+        status == 200
+        and payload["ok"] is False
+        and any("项目未运行" in item for item in payload["errors"]),
+        f"无 Origin 应过守卫并回「项目未运行」：{status} / {payload}",
+    )
+    status, raw = http_raw(
+        ctx.port,
+        "POST",
+        "/api/projects/close",
+        {"Origin": f"http://127.0.0.1:{ctx.port}"},
+        {"root": missing},
+    )
+    payload = json.loads(raw.decode("utf-8"))
+    check(
+        status == 200
+        and payload["ok"] is False
+        and any("项目未运行" in item for item in payload["errors"]),
+        f"同源 Origin 应过守卫：{status} / {payload}",
+    )
 
 
 # ---- 用例：项目生命周期 -------------------------------------------------
@@ -571,23 +556,35 @@ def _project_payload(**overrides):
 
 def case_contract_health(ctx):
     _contract(check_health, {"ok": True})
-    _must_raise(check_health, {"ok": False}, "ok 必须为 true")
-    _must_raise(check_health, [], "必须是 dict")
+    expect_raises(LauncherError, lambda: check_health({"ok": False}), "ok 必须为 true")
+    expect_raises(LauncherError, lambda: check_health([]), "必须是 dict")
 
 
 def case_contract_projects(ctx):
     _contract(check_projects, {"ok": True, "errors": [], "projects": [_project_payload()]})
     _contract(check_projects, {"ok": False, "errors": ["引擎不可用"]})
-    _must_raise(
-        check_projects,
-        {"ok": True, "errors": [], "projects": [_project_payload(), _project_payload()]},
+    expect_raises(
+        LauncherError,
+        lambda: check_projects(
+            {"ok": True, "errors": [], "projects": [_project_payload(), _project_payload()]}
+        ),
         "项目重复",
     )
-    _must_raise(check_projects, {"ok": True, "errors": []}, "必须是数组")
-    _must_raise(check_projects, {"ok": False, "errors": []}, "至少一条")
-    _must_raise(
-        check_projects,
-        {"ok": True, "errors": [], "projects": [_project_payload(port=True)]},
+    expect_raises(
+        LauncherError,
+        lambda: check_projects({"ok": True, "errors": []}),
+        "必须是数组",
+    )
+    expect_raises(
+        LauncherError,
+        lambda: check_projects({"ok": False, "errors": []}),
+        "至少一条",
+    )
+    expect_raises(
+        LauncherError,
+        lambda: check_projects(
+            {"ok": True, "errors": [], "projects": [_project_payload(port=True)]}
+        ),
         "1-65535",
     )
 
@@ -595,15 +592,23 @@ def case_contract_projects(ctx):
 def case_contract_project_result(ctx):
     _contract(check_project_result, {"ok": True, "errors": [], "project": _project_payload()})
     _contract(check_project_result, {"ok": False, "errors": ["起不来"], "project": None})
-    _must_raise(check_project_result, {"ok": True, "errors": []}, "必须是 dict")
-    _must_raise(
-        check_project_result,
-        {"ok": False, "errors": ["x"], "project": _project_payload()},
+    expect_raises(
+        LauncherError,
+        lambda: check_project_result({"ok": True, "errors": []}),
+        "必须是 dict",
+    )
+    expect_raises(
+        LauncherError,
+        lambda: check_project_result(
+            {"ok": False, "errors": ["x"], "project": _project_payload()}
+        ),
         "project 必须是 null",
     )
-    _must_raise(
-        check_project_result,
-        {"ok": True, "errors": [], "project": _project_payload(pid=0)},
+    expect_raises(
+        LauncherError,
+        lambda: check_project_result(
+            {"ok": True, "errors": [], "project": _project_payload(pid=0)}
+        ),
         "正整数",
     )
 
@@ -611,7 +616,11 @@ def case_contract_project_result(ctx):
 def case_contract_close(ctx):
     _contract(check_close, {"ok": True, "errors": []})
     _contract(check_close, {"ok": False, "errors": ["项目未运行：x"]})
-    _must_raise(check_close, {"ok": False, "errors": []}, "至少一条")
+    expect_raises(
+        LauncherError,
+        lambda: check_close({"ok": False, "errors": []}),
+        "至少一条",
+    )
 
 
 def case_contract_dirs(ctx):
@@ -627,28 +636,32 @@ def case_contract_dirs(ctx):
         },
     )
     _contract(check_dirs, {"ok": False, "errors": ["目录不存在或不是目录：x"]})
-    _must_raise(
-        check_dirs,
-        {"ok": True, "errors": [], "path": 42, "parent": None, "entries": []},
+    expect_raises(
+        LauncherError,
+        lambda: check_dirs({"ok": True, "errors": [], "path": 42, "parent": None, "entries": []}),
         "必须是字符串",
     )
-    _must_raise(
-        check_dirs,
-        {"ok": True, "errors": [], "path": "", "parent": "", "entries": []},
+    expect_raises(
+        LauncherError,
+        lambda: check_dirs({"ok": True, "errors": [], "path": "", "parent": "", "entries": []}),
         "parent 必须是非空字符串或 null",
     )
-    _must_raise(
-        check_dirs, {"ok": True, "errors": [], "path": "", "parent": None}, "必须是数组"
+    expect_raises(
+        LauncherError,
+        lambda: check_dirs({"ok": True, "errors": [], "path": "", "parent": None}),
+        "必须是数组",
     )
-    _must_raise(
-        check_dirs,
-        {
-            "ok": True,
-            "errors": [],
-            "path": "",
-            "parent": None,
-            "entries": [{"name": "", "path": "x"}],
-        },
+    expect_raises(
+        LauncherError,
+        lambda: check_dirs(
+            {
+                "ok": True,
+                "errors": [],
+                "path": "",
+                "parent": None,
+                "entries": [{"name": "", "path": "x"}],
+            }
+        ),
         "entries[].name",
     )
 
@@ -661,6 +674,8 @@ CASES = [
     ("dirs 只列子目录且排序、parent 正确", case_dirs_children),
     ("dirs 盘符根 parent 为 null", case_dirs_drive_root),
     ("dirs 不存在/非目录回 400", case_dirs_bad_path),
+    ("launcher Host 守卫：只认本机本端口", case_host_guard),
+    ("launcher Origin 守卫：跨源 403、同源放行", case_origin_guard),
     ("项目打开：形状与子进程 health", case_open_project),
     ("项目子进程 /api/project 的 root 一致", case_child_project_info),
     ("同一 path 再开复用 pid/port", case_same_path_reuses_process),

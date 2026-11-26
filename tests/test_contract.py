@@ -1,4 +1,4 @@
-"""studio.contract 四个校验器的契约测试。
+"""studio.contract 校验器的契约测试。
 
 直接运行：python tests/test_contract.py
 """
@@ -16,10 +16,15 @@ if str(ROOT) not in sys.path:
 from engine.registry import Registry
 from studio.contract import (
     ContractError,
+    check_file,
     check_health,
+    check_path_result,
     check_plugins,
+    check_project,
     check_run,
+    check_tree,
     check_validate,
+    check_write_file,
 )
 from studio.project import Project
 from studio.server import EngineService
@@ -244,6 +249,138 @@ def case_real_service_payloads():
         check(check_run(failed) == failed, "run 失败响应未通过契约")
 
 
+# ---- 项目与文件接口：check_project / check_tree / check_file / check_write_file / check_path_result ----
+
+def case_project_accepts_and_rejects():
+    good = {
+        "ok": True,
+        "errors": [],
+        "root": r"C:\proj",
+        "name": "proj",
+        "launcher": None,
+        "plugins": {"global": 5, "project": 0},
+        "skipped": [],
+    }
+    check(check_project(good) == good, "project 合法载荷应通过")
+
+    payload = copy.deepcopy(good)
+    payload["root"] = ""
+    expect_raises(
+        ContractError, lambda: check_project(payload), "project.root 必须是非空字符串"
+    )
+
+    payload = copy.deepcopy(good)
+    payload["plugins"]["global"] = True
+    expect_raises(ContractError, lambda: check_project(payload), "非负整数")
+
+    payload = copy.deepcopy(good)
+    payload["skipped"] = [
+        {"file": "x.zip", "path": "x.zip", "reason": "坏包", "source": "other"}
+    ]
+    expect_raises(
+        ContractError, lambda: check_project(payload), "source 只能是 global 或 project"
+    )
+
+
+def case_tree_accepts_and_rejects():
+    good = {
+        "ok": True,
+        "errors": [],
+        "path": "",
+        "entries": [
+            {"name": "d", "path": "d", "kind": "dir"},
+            {"name": "a.txt", "path": "a.txt", "kind": "file", "size": 3},
+        ],
+    }
+    check(check_tree(good) == good, "tree 合法载荷应通过")
+
+    payload = copy.deepcopy(good)
+    payload["entries"][0]["kind"] = "link"
+    expect_raises(ContractError, lambda: check_tree(payload), "kind 只能是 file 或 dir")
+
+    payload = copy.deepcopy(good)
+    payload["entries"][1]["size"] = True
+    expect_raises(ContractError, lambda: check_tree(payload), "size 必须是非负整数")
+
+    payload = copy.deepcopy(good)
+    payload["entries"][1]["path"] = "../x"
+    expect_raises(ContractError, lambda: check_tree(payload), "不能包含 ..")
+
+
+def case_file_accepts_and_rejects():
+    text = {
+        "ok": True,
+        "errors": [],
+        "path": "a.txt",
+        "kind": "text",
+        "size": 3,
+        "text": "abc",
+    }
+    binary = {
+        "ok": True,
+        "errors": [],
+        "path": "b.bin",
+        "kind": "binary",
+        "size": 4,
+        "text": None,
+    }
+    check(check_file(text) == text, "file text 载荷应通过")
+    check(check_file(binary) == binary, "file binary 载荷应通过")
+
+    payload = copy.deepcopy(text)
+    payload["kind"] = "weird"
+    expect_raises(
+        ContractError,
+        lambda: check_file(payload),
+        "kind 只能是 text / binary / too_large",
+    )
+
+    payload = copy.deepcopy(binary)
+    payload["text"] = "x"
+    expect_raises(ContractError, lambda: check_file(payload), "text 必须是 null")
+
+    payload = copy.deepcopy(text)
+    payload["size"] = True
+    expect_raises(ContractError, lambda: check_file(payload), "size 必须是非负整数")
+
+
+def case_write_file_accepts_and_rejects():
+    good = {"ok": True, "errors": [], "path": "a.txt", "size": 3}
+    check(check_write_file(good) == good, "write_file 合法载荷应通过")
+
+    payload = copy.deepcopy(good)
+    payload["size"] = True
+    expect_raises(
+        ContractError, lambda: check_write_file(payload), "size 必须是非负整数"
+    )
+
+    payload = copy.deepcopy(good)
+    payload["path"] = ""
+    expect_raises(ContractError, lambda: check_write_file(payload), "path 不能为空")
+
+    payload = copy.deepcopy(good)
+    payload["path"] = "../x"
+    expect_raises(ContractError, lambda: check_write_file(payload), "不能包含 ..")
+
+
+def case_path_result_accepts_and_rejects():
+    done = {"ok": True, "errors": [], "path": "newdir"}
+    check(check_path_result(done, "mkdir") == done, "path_result 成功载荷应通过")
+
+    failed = {"ok": False, "errors": ["已存在：newdir"], "path": "newdir"}
+    check(check_path_result(failed, "mkdir") == failed, "path_result 失败载荷应通过")
+
+    payload = {"ok": True, "errors": []}
+    expect_raises(
+        ContractError, lambda: check_path_result(payload, "mkdir"), "path 必须是字符串"
+    )
+
+    payload = {"ok": True, "errors": [], "path": "../x"}
+    expect_raises(
+        ContractError, lambda: check_path_result(payload, "mkdir"), "不能包含 .."
+    )
+
+
 CASES = [
     ("check_health 拒绝畸形载荷", case_health_rejects),
     ("check_plugins 拒绝畸形载荷", case_plugins_rejects),
@@ -251,6 +388,11 @@ CASES = [
     ("check_validate 接受正常载荷", case_validate_accepts),
     ("check_run 拒绝畸形载荷", case_run_rejects),
     ("check_run 接受正常载荷", case_run_accepts),
+    ("check_project 接受合法/拒绝畸形", case_project_accepts_and_rejects),
+    ("check_tree 接受合法/拒绝畸形", case_tree_accepts_and_rejects),
+    ("check_file 接受合法/拒绝畸形", case_file_accepts_and_rejects),
+    ("check_write_file 接受合法/拒绝畸形", case_write_file_accepts_and_rejects),
+    ("check_path_result 接受合法/拒绝畸形", case_path_result_accepts_and_rejects),
     ("真实服务四个响应通过对应校验器", case_real_service_payloads),
 ]
 

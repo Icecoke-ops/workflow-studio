@@ -1,10 +1,15 @@
-"""测试公共设施：断言、异常匹配、用例循环，以及临时插件 zip 夹具。
+"""测试公共设施：断言、异常匹配、用例循环、进程/端口探针，以及临时插件 zip 夹具。
 
 每个 test_*.py 只保留自己的用例，跑测循环统一走这里。
 """
 
+import ctypes
+import http.client
+import json
 import os
 import re
+import socket
+import time
 import traceback
 import zipfile
 from contextlib import contextmanager
@@ -21,6 +26,154 @@ _REGISTRY = None
 
 # 回归演示工作流：唯一被测试依赖的示例已迁成 tests/fixtures 夹具。
 DEMO_WORKFLOW = _ROOT / "tests" / "fixtures" / "regression_demo.flow"
+
+
+# ---- 进程 / 端口（launcher 与 studio 测试共用） -------------------------
+
+def _winapi():
+    """kernel32 签名；不设 restype 的话 64 位句柄会被截断。"""
+    api = ctypes.WinDLL("kernel32", use_last_error=True)
+    api.CreateToolhelp32Snapshot.argtypes = (ctypes.c_uint32, ctypes.c_uint32)
+    api.CreateToolhelp32Snapshot.restype = ctypes.c_void_p
+    api.Process32First.argtypes = (ctypes.c_void_p, ctypes.c_void_p)
+    api.Process32First.restype = ctypes.c_int
+    api.Process32Next.argtypes = (ctypes.c_void_p, ctypes.c_void_p)
+    api.Process32Next.restype = ctypes.c_int
+    api.OpenProcess.argtypes = (ctypes.c_uint32, ctypes.c_int, ctypes.c_uint32)
+    api.OpenProcess.restype = ctypes.c_void_p
+    api.GetExitCodeProcess.argtypes = (ctypes.c_void_p, ctypes.POINTER(ctypes.c_ulong))
+    api.GetExitCodeProcess.restype = ctypes.c_int
+    api.TerminateProcess.argtypes = (ctypes.c_void_p, ctypes.c_uint)
+    api.CloseHandle.argtypes = (ctypes.c_void_p,)
+    return api
+
+
+def pid_alive(pid):
+    """进程还在吗：Windows 用 GetExitCodeProcess，其余平台 os.kill(pid, 0)。"""
+    if os.name != "nt":
+        try:
+            os.kill(pid, 0)
+            return True
+        except OSError:
+            return False
+    api = _winapi()
+    handle = api.OpenProcess(0x1000, 0, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+    if not handle:
+        return False
+    try:
+        code = ctypes.c_ulong()
+        if not api.GetExitCodeProcess(handle, ctypes.byref(code)):
+            return False
+        return code.value == 259  # STILL_ACTIVE
+    finally:
+        api.CloseHandle(handle)
+
+
+def kill_pid(pid):
+    if os.name != "nt":
+        try:
+            os.kill(pid, 9)
+        except OSError:
+            pass
+        return
+    api = _winapi()
+    handle = api.OpenProcess(0x0001, 0, pid)  # PROCESS_TERMINATE
+    if handle:
+        api.TerminateProcess(handle, 1)
+        api.CloseHandle(handle)
+
+
+def free_port():
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        return sock.getsockname()[1]
+
+
+def port_open(port, timeout=0.3):
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+
+def wait_until(predicate, timeout, interval=0.1):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        time.sleep(interval)
+    return predicate()
+
+
+def wait_port_closed(port, timeout=5.0):
+    return wait_until(lambda: not port_open(port), timeout)
+
+
+def wait_pid_gone(pid, timeout=5.0):
+    return wait_until(lambda: not pid_alive(pid), timeout)
+
+
+def http_raw(port, method, path, headers=None, payload=None, timeout=10.0):
+    """发一条可自定义 Host/Origin 的请求，返回 (状态码, 原始字节)。
+
+    默认 Host 指向 127.0.0.1:<port>（回环守卫放行的形状），调用方按需覆盖。
+    """
+    body = b""
+    merged = {"Host": f"127.0.0.1:{port}"}
+    if payload is not None:
+        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        merged["Content-Type"] = "application/json; charset=utf-8"
+    merged.update(headers or {})
+    connection = http.client.HTTPConnection("127.0.0.1", port, timeout=timeout)
+    try:
+        connection.putrequest(method, path, skip_host=True, skip_accept_encoding=True)
+        for key, value in merged.items():
+            connection.putheader(key, value)
+        if body:
+            connection.putheader("Content-Length", str(len(body)))
+        connection.endheaders(body or None)
+        response = connection.getresponse()
+        return response.status, response.read()
+    finally:
+        connection.close()
+
+
+class PROCESSENTRY32(ctypes.Structure):
+    _fields_ = [
+        ("dwSize", ctypes.c_uint32),
+        ("cntUsage", ctypes.c_uint32),
+        ("th32ProcessID", ctypes.c_uint32),
+        ("th32DefaultHeapID", ctypes.c_void_p),
+        ("th32ModuleID", ctypes.c_uint32),
+        ("cntThreads", ctypes.c_uint32),
+        ("th32ParentProcessID", ctypes.c_uint32),
+        ("pcPriClassBase", ctypes.c_long),
+        ("dwFlags", ctypes.c_uint32),
+        ("szExeFile", ctypes.c_char * 260),
+    ]
+
+
+def children_of(parent_pid):
+    """父进程的直接子进程（Windows Toolhelp 快照；WMI 在沙箱里被禁）。"""
+    if os.name != "nt":
+        return []
+    api = _winapi()
+    snapshot = api.CreateToolhelp32Snapshot(0x00000002, 0)  # TH32CS_SNAPPROCESS
+    if not snapshot or snapshot == ctypes.c_void_p(-1).value:
+        return []
+    entry = PROCESSENTRY32()
+    entry.dwSize = ctypes.sizeof(entry)
+    found = []
+    try:
+        ok = api.Process32First(snapshot, ctypes.byref(entry))
+        while ok:
+            if entry.th32ParentProcessID == parent_pid:
+                found.append(entry.th32ProcessID)
+            ok = api.Process32Next(snapshot, ctypes.byref(entry))
+    finally:
+        api.CloseHandle(snapshot)
+    return found
 
 
 def check(condition, message):
