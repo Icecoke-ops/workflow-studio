@@ -263,7 +263,7 @@ def _collect_types(package):
 def load_plugin(zip_path, loaded_names):
     package = _package_name(zip_path)
     if package in loaded_names:
-        previous = loaded_names.get(package) if hasattr(loaded_names, "get") else None
+        previous = loaded_names.get(package)
         source = getattr(previous, "source", "")
         if not source or source.startswith("<"):
             source = "已加载的插件"
