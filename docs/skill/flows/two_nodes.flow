@@ -1,0 +1,36 @@
+{
+  "name": "两节点：读取 CSV 后选列",
+  "env": {
+    "INPUT": "data.csv"
+  },
+  "nodes": [
+    {
+      "id": "load",
+      "plugin": "fileio",
+      "component": "LoadCSV",
+      "config": {
+        "path": "${INPUT}",
+        "encoding": "utf-8",
+        "sep": ",",
+        "header": true
+      }
+    },
+    {
+      "id": "select",
+      "plugin": "table",
+      "component": "SelectColumns",
+      "config": {
+        "columns": [
+          "a"
+        ],
+        "strict": true
+      },
+      "inputs": {
+        "data": {
+          "from": "load",
+          "port": "table"
+        }
+      }
+    }
+  ]
+}

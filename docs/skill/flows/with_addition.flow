@@ -1,0 +1,61 @@
+{
+  "name": "带编辑器私有块：两节点",
+  "env": {
+    "INPUT": "data.csv"
+  },
+  "nodes": [
+    {
+      "id": "load",
+      "plugin": "fileio",
+      "component": "LoadCSV",
+      "config": {
+        "path": "${INPUT}",
+        "encoding": "utf-8",
+        "sep": ",",
+        "header": true
+      }
+    },
+    {
+      "id": "select",
+      "plugin": "table",
+      "component": "SelectColumns",
+      "config": {
+        "columns": [
+          "a"
+        ],
+        "strict": true
+      },
+      "inputs": {
+        "data": {
+          "from": "load",
+          "port": "table"
+        }
+      }
+    }
+  ],
+  "addition": {
+    "client": "workflow-studio",
+    "version": 1,
+    "positions": {
+      "load": {
+        "x": 80,
+        "y": 120
+      },
+      "select": {
+        "x": 420,
+        "y": 120
+      }
+    },
+    "groups": [
+      {
+        "id": "g1",
+        "title": "读取与选列",
+        "collapsed": false,
+        "members": [
+          "load",
+          "select"
+        ]
+      }
+    ]
+  }
+}

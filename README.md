@@ -30,6 +30,8 @@
 | `tests/` | 测试套件；`tests/fixtures/` 放示例工作流等夹具 |
 | `docs/` | 对外契约文档 |
 
+给智能体直接用的 skill 包（入口、接口参考、示例脚本、flow 模板）：[`docs/skill/SKILL.md`](docs/skill/SKILL.md)。
+
 ## 内置组件
 
 插件按**职责**分包，依赖也跟着分开：装不装 scikit-learn 决定你能不能用 `ml`，跟读不读 CSV 无关。

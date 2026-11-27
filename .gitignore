@@ -23,3 +23,7 @@ regression_out.csv
 
 # 内部协作文档（归属表、团队规则、本机环境）不进公开仓库
 .internal/
+AGENTS.md
+
+# 各 Bot 的临时工作区
+.tmp/

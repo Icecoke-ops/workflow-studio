@@ -1,0 +1,13 @@
+{
+  "name": "最小示例：读取 CSV",
+  "nodes": [
+    {
+      "id": "load",
+      "plugin": "fileio",
+      "component": "LoadCSV",
+      "config": {
+        "path": "data.csv"
+      }
+    }
+  ]
+}
