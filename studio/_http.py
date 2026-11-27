@@ -29,6 +29,8 @@ class StudioHTTPHandler(BaseHTTPRequestHandler):
 
     timeout = 30
     max_body = 16 * 1024 * 1024
+    max_drain = 32 * 1024 * 1024  # 回错误前最多读掉这么多请求体
+    _body_read = 0  # 当前请求已读掉的请求体字节数
 
     def do_GET(self):
         self._dispatch(self._handle_get)
@@ -38,6 +40,7 @@ class StudioHTTPHandler(BaseHTTPRequestHandler):
 
     def handle_one_request(self):
         """对端在读请求阶段就 RST 也是正常断线，别让 socketserver 打整栈。"""
+        self._body_read = 0
         try:
             super().handle_one_request()
         except (BrokenPipeError, ConnectionResetError):
@@ -72,6 +75,7 @@ class StudioHTTPHandler(BaseHTTPRequestHandler):
         hosts = [f"127.0.0.1:{port}", f"localhost:{port}"]
         host = self.headers.get("Host")
         if host not in hosts:
+            self._discard_body()
             self._send_json(HTTPStatus.FORBIDDEN, fail([f"Host 不被允许：{host!r}"]))
             return False
         if self.command == "POST":
@@ -79,6 +83,7 @@ class StudioHTTPHandler(BaseHTTPRequestHandler):
             if origin is not None and origin not in [
                 f"http://{item}" for item in hosts
             ]:
+                self._discard_body()
                 self._send_json(
                     HTTPStatus.FORBIDDEN, fail([f"Origin 不被允许：{origin!r}"])
                 )
@@ -98,9 +103,11 @@ class StudioHTTPHandler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def _not_found(self, path):
+        self._discard_body()
         self._send_json(HTTPStatus.NOT_FOUND, fail([f"未知路径：{path}"]))
 
     def _bad_request(self, message):
+        self._discard_body()
         self._send_json(HTTPStatus.BAD_REQUEST, fail([message]))
 
     def _string_field(self, payload, key):
@@ -111,18 +118,42 @@ class StudioHTTPHandler(BaseHTTPRequestHandler):
         return value
 
     # -- 请求 ------------------------------------------------------------
-    def _read_json(self):
+    def _content_length(self):
         try:
-            length = int(self.headers.get("Content-Length") or 0)
+            return max(0, int(self.headers.get("Content-Length") or 0))
         except ValueError:
-            length = 0
+            return 0
+
+    def _discard_body(self):
+        """回错误前把没读完的请求体读掉，别让客户端还在写就被重置。
+
+        最多再读 ``max_drain`` 字节；读不空就关连接，避免被超大声明拖住。
+        """
+        left = self._content_length() - self._body_read
+        if left <= 0:
+            return
+        budget = min(left, self.max_drain)
+        while budget > 0:
+            chunk = self.rfile.read(min(budget, 65536))
+            if not chunk:
+                break
+            self._body_read += len(chunk)
+            budget -= len(chunk)
+        if self._content_length() > self._body_read:
+            self.close_connection = True
+
+    def _read_json(self):
+        length = self._content_length()
         if length > self.max_body:
+            self._discard_body()
+            self.close_connection = True
             self._send_json(
                 HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
                 fail([f"请求体超过 {self.max_body} 字节"]),
             )
             return None
         raw = self.rfile.read(length) if length > 0 else b""
+        self._body_read = len(raw)
         try:
             payload = json.loads(raw.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError):
