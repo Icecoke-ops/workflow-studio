@@ -291,7 +291,7 @@ Studio 是两层进程：
 
 | 方法 | 路径 | 响应 |
 |---|---|---|
-| GET | `/api/health` | `{"ok":true,"engine":"0.7.0","plugins":6,"components":27}` |
+| GET | `/api/health` | `{"ok":true,"engine":"0.7.1","plugins":6,"components":27}` |
 | GET | `/api/plugins` | `{"plugins":[{name,version,title,types:[{id,desc}],components:[{name,title,desc,config_schema,input_schema,output_schema}]}]}` |
 | GET | `/api/project` | `{"ok":true,"root","name","launcher","plugins":{"global":n,"project":n},"skipped":[{"file","path","reason","source"}],"errors":[]}` |
 | GET | `/api/tree` | `?path=<项目内相对路径>`（空串=项目根）→ `{"ok":true,"path","entries":[{name,path,kind:"dir"\|"file",size?}],"errors":[]}`，只列一层，目录在前 |

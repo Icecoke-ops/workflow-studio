@@ -230,7 +230,7 @@ GET http://127.0.0.1:51234/api/health
 ```
 
 ```json
-{"ok": true, "engine": "0.7.0", "plugins": 6, "components": 27}
+{"ok": true, "engine": "0.7.1", "plugins": 6, "components": 27}
 ```
 
 ### GET /api/plugins
@@ -837,7 +837,7 @@ ws://127.0.0.1:<port>/?token=<token>
   "type": "log",
   "node": "loadmodel",
   "stream": "stderr",
-  "text": "[警告] 模型 model.joblib 由引擎 v0.0.1 保存，当前引擎 v0.7.0；继续加载，若预测结果异常请重新训练并保存"
+  "text": "[警告] 模型 model.joblib 由引擎 v0.0.1 保存，当前引擎 v0.7.1；继续加载，若预测结果异常请重新训练并保存"
 }
 ```
 
