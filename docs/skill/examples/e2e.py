@@ -1,6 +1,6 @@
 """端到端自检：打开项目 → 读插件 → 建 flow → 校验 → 执行 → 读结果 → 重启 → 关闭。
 
-    python docs/skill/examples/e2e.py --launcher http://127.0.0.1:8765
+    在 skill 目录（workflow-studio/）下运行：python examples/e2e.py --launcher http://127.0.0.1:8765
 
 前置：launcher 已在跑（`python -m studio --port 8765`）。脚本自己在临时目录建项目，
 结束时关闭项目并删除临时目录；全程断言，任何一步不符就非零退出。
