@@ -10,17 +10,17 @@
 
 - **不依赖任何具体插件**。一个插件都没有，或者只有第三方插件、官方插件全删光，引擎照样能加载、校验、执行工作流。
 - **不认识 studio 和 frontend**。`engine/` 下的源码不出现、不 import 这两个目录的任何东西，也不为 studio 加任何兼容分支。依赖方向只有一个：studio → engine。
-- **插件目录可缺省**。全局目录是引擎包同级的 `plugins/`（与当前工作目录无关），缺失只警告不中断；`-p/--plugins-dir` 可重复，追加扫描任意多个目录。
+- **插件目录可缺省**。全局目录是引擎包同级的 `plugins/`（与当前工作目录无关），缺失只警告不中断；`-p/--plugins-dir` 可重复，追加扫描任意多个插件根目录（根下是插件子目录）。
 - **标准类型属于引擎**。`std_1.0@*` 五个类型和 `PredictorModel` 契约定义在 `engine/stdtypes.py`，不由任何插件提供。
 
 ---
 
 ## 2. 插件契约
 
-### 2.1 zip 结构
+### 2.1 目录结构
 
 ```
-<插件名>.zip
+plugins/
 └─ <插件名>/
    ├─ __init__.py          # 必须
    ├─ components.py        # 必须，只放声明
@@ -29,16 +29,21 @@
    └─ ...                  # 任意子目录、源文件、数据文件
 ```
 
+插件 = 插件根目录（全局 `plugins/`、项目 `plugins/`、每个 `-p` 目录）下的**子目录**，目录名 == `PLUGIN_NAME`。zip 不再是引擎认识的加载格式，只作传输用途。
+
 硬规则：
 
-- zip 顶层**恰好一个**目录，且目录名 == `PLUGIN_NAME` == zip 文件名主干
-- 插件名必须是 **`sys.path` 上查不到的**顶层名：加载前用 `PathFinder.find_spec(包名)` 检查，只要能找到 `loader` 非空的模块（磁盘上的标准库模块、已安装的第三方包）就拒绝——插件目录会进 `sys.path`，重名会顶掉全进程对它的 import。`std` 是引擎保留的命名空间，另行拒绝。内置模块（`sys`、`time` 等）不在 `sys.path` 上，`PathFinder` 查不到，因此不单独拦截；但它们的 import 由内置加载器优先解析，zip 顶不掉，不构成风险
-- **每个含 `.py` 的目录都必须有 `__init__.py`**（zipimport 不支持隐式命名空间包）
-- 源文件不能放在 zip 根目录
+- 没有 `components.py` 的子目录**不是插件**：进 `skipped`（带原因），不报错
+- 插件名必须是 **`sys.path` 上查不到的**顶层名：加载前用 `PathFinder.find_spec(包名)` 检查，能找到 `loader` 非空的模块（标准库、已安装第三方包）就拒绝——插件根会挂上 `sys.path`，重名会顶掉全进程对它的 import。检查发生在**任何插件根挂载之前**：先收集全部根的插件目录、完成全部名字校验，再统一挂载、按序 import。`std` 是引擎保留的命名空间，另行拒绝
+- **每个含 `.py` 的目录都必须有 `__init__.py`**（防止半个包静默加载失败）
+- 加载 = 把插件根挂 `sys.path`，包走标准 import。**插件根下的所有子目录都会进入 import 命名空间**（包括被 `skipped` 的），所以插件根里只放插件目录
 
 `requirements.txt` 只检查依赖**是否已安装**。写了版本约束（如 `pandas>=2.0`）时引擎会在 stderr 提示「只检查是否安装，不校验版本」，不会因此拦住加载。
 
-同一个进程里重复加载同名插件 = **真正重载**：引擎会先清掉 `sys.modules` 里该插件包下的旧模块，再按新 zip 重新导入。所以「改了插件重新 build + load」能拿到新代码，不会复用旧类。
+同一个进程里重复加载同名插件 = **真正重载**：先清掉 `sys.modules` 里该插件包下的旧模块，并 `importlib.invalidate_caches()`（源目录的内容清单会被 FileFinder 缓存，不失效会读到旧文件），再重新导入。日常改动生效仍靠 Studio 的 restart（进程级重载）；进程内重载服务于测试与同目录反复 load。
+
+- **重载 = 新建 `Registry` 实例**。同一个实例二次 `load()` 不是重载：候选重名会判冲突（跨根同名的预检查在挂载前做），`skipped` 也会被新一轮覆盖。
+- **同秒同长度改写可能命中旧 `.pyc`**：CPython 的字节码缓存按「秒级 mtime + 源文件大小」判断新旧，同一秒内把源码改成等长内容且 mtime 未变时，重载与进程重启都可能读到旧字节码。改代码后隔一秒再重启即可，别为这个加机制。
 
 ### 2.2 components.py
 
@@ -53,7 +58,7 @@ PLUGIN_TITLE = "数据处理"
 COMPONENTS = [SelectColumns]
 ```
 
-四个常量都在加载期校验：`PLUGIN_NAME` 必须与 zip 内目录名一致、`PLUGIN_VERSION` 形如 `1.0`、`PLUGIN_TITLE` 必须是字符串（不写或空串则回退为插件名）、`COMPONENTS` 必须是非空列表。
+四个常量都在加载期校验：`PLUGIN_NAME` 必须与目录名一致、`PLUGIN_VERSION` 形如 `1.0`、`PLUGIN_TITLE` 必须是字符串（不写或空串则回退为插件名）、`COMPONENTS` 必须是非空列表。
 
 ### 2.3 组件类
 
@@ -291,7 +296,7 @@ Studio 是两层进程：
 
 | 方法 | 路径 | 响应 |
 |---|---|---|
-| GET | `/api/health` | `{"ok":true,"engine":"0.7.1","plugins":6,"components":27}` |
+| GET | `/api/health` | `{"ok":true,"engine":"0.8.0","plugins":6,"components":27}` |
 | GET | `/api/plugins` | `{"plugins":[{name,version,title,types:[{id,desc}],components:[{name,title,desc,config_schema,input_schema,output_schema}]}]}` |
 | GET | `/api/project` | `{"ok":true,"root","name","launcher","plugins":{"global":n,"project":n},"skipped":[{"file","path","reason","source"}],"errors":[]}` |
 | GET | `/api/tree` | `?path=<项目内相对路径>`（空串=项目根）→ `{"ok":true,"path","entries":[{name,path,kind:"dir"\|"file",size?}],"errors":[]}`，只列一层，目录在前 |
@@ -311,7 +316,7 @@ Studio 是两层进程：
 
 `input_schema` 每项额外带 `type_labels`（短名数组），`output_schema` 每项额外带 `type_label`，供界面显示。
 
-插件加载：全局目录（引擎包同级 `plugins/`）始终参与；项目根下 `plugins/` 存在时作为项目插件一起加载。同名插件硬报错——`/api/project` 回 `ok:false`、`errors` 带两个绝对路径，`health` 的插件数归零，但文件接口照常可用；非插件 zip 只进 `skipped`（带 `source: "global"|"project"`），不报错。
+插件加载：全局目录（引擎包同级 `plugins/`）始终参与；项目根下 `plugins/` 存在时作为项目插件一起加载。同名插件硬报错——`/api/project` 回 `ok:false`、`errors` 带两个绝对路径，`health` 的插件数归零，但文件接口照常可用；没有 `components.py` 的子目录只进 `skipped`（带 `source: "global"|"project"` 与原因），不报错。插件根下的**文件**（含 zip）不参与扫描。
 
 路径规则：所有 `path` 都是**项目内相对路径**，拒绝 `..`、绝对路径、盘符、UNC，也拒绝经链接（junction / 符号链接）指到项目外。文本文件上限 1 MiB，含 NUL 判为 `binary`。
 
@@ -324,7 +329,7 @@ Studio 是两层进程：
 - `start`：把请求里的 `workflow` 原样写进系统临时目录的 JSON，`secrets` 随机 token，spawn `python -m engine run --hook hooks/http_debug -e workspace=<项目根> -e hook_port=0 -e hook_port_file=<临时目录>/debug_<session>.port -e hook_token=<token> <临时文件>`；**Studio 不自己挑端口**，只等钩子把 bind 时的实际端口写进那个文件（**超时 10 秒**，超时杀子进程、删临时文件、回 `ok:false`，并把子进程 stderr 尾部带进 `errors`）。子进程提前崩同样立刻失败，不等满超时。
   - 为什么不「先挑空闲端口再连一下」：端口在挑选和真正 bind 之间会被别人占走，而「连得上」无法区分自己的钩子和别人的监听——那会把别人的钩子当成就绪（已踩过，偶发 WebSocket 1000 关闭）。端口由 bind 分配、文件由钩子写完，窗口不存在。
 - **子进程 cwd = 项目根**，仓库根经 `PYTHONPATH` 注入（cwd 不再是仓库根，否则 `-m engine` 找不到）。`${workspace}` 显式传项目根，且排在其他 `-e` 之前，用户自己的覆盖仍然生效。
-- **插件必须原样透传**：项目根下有 `plugins/` 时追加 `--plugins-dir <项目根>/plugins`，与 Studio 主进程加载的是同一批 zip；否则调试子进程看到的插件跟主进程不一致，那种差异以后极难查。`-e` 同样原样透传。
+- **插件必须原样透传**：项目根下有 `plugins/` 时追加 `--plugins-dir <项目根>/plugins`，与 Studio 主进程加载的是同一批插件目录；否则调试子进程看到的插件跟主进程不一致，那种差异以后极难查。`-e` 同样原样透传。
 - **同一时刻只允许一个调试会话**；新 `start` 先按 `stop` 流程关掉旧的。
 - `stop`：先 `POST http://127.0.0.1:<port>/shutdown` 让它自己退，3 秒内没退就 `kill`；删临时文件。未知 `session` 回 `ok:false`。
 - 子进程的 stdout/stderr 由 Studio 接管，不混进 Studio 自己的输出；Studio 进程退出时关掉所有调试子进程。Windows 上调试子进程被放进 Job Object（父进程死掉即终止）；其它平台没有等价兜底，项目进程被 SIGTERM 时调试子进程可能残留——当前只在 Windows 实测。
@@ -356,7 +361,6 @@ base: '/static/'      // 构建时生效，dev 用 '/'
 
 | 用途 | 命令 |
 |---|---|
-| 打包插件 | `python tools/build_plugins.py` |
 | 命令行引擎 | `python -m engine run <json>` / `validate` / `plugins` |
 | 指定插件目录 | `python -m engine run -p <dir> <json>` |
 | 指定环境变量 | `python -m engine -e DATA_DIR=D:\data -e MODEL_DIR=D:\models run <json>` |
@@ -366,7 +370,7 @@ base: '/static/'      // 构建时生效，dev 用 '/'
 | 冒烟 | `python tests/smoke.py` |
 | 全量测试 | `python tests/run_all.py` |
 
-`-p/--plugins-dir` 可重复，写在子命令前后都有效。实际扫描 = 引擎包同级的 `plugins/` + 所有指定目录，每个目录只扫一层 `*.zip`，不递归；不同目录出现同名插件直接报错，不静默覆盖。
+`-p/--plugins-dir` 可重复，写在子命令前后都有效。实际扫描 = 引擎包同级的 `plugins/` + 所有指定目录，每个插件根只扫一层子目录（每个子目录即一个插件）；不同目录出现同名插件直接报错，不静默覆盖。
 
 ---
 

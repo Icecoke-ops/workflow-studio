@@ -4,7 +4,6 @@
 直接运行：python tests/test_hooks.py
 """
 
-import gc
 import importlib
 import json
 import os
@@ -15,7 +14,6 @@ import tempfile
 import threading
 import time
 import types
-import zipfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -34,7 +32,7 @@ from engine.registry import Registry
 from engine.runner import Execution, execute, run
 from engine.workflow import validate
 
-from _harness import check, env_guard, expect_raises, run_cases, write_zip
+from _harness import check, env_guard, expect_raises, run_cases, write_plugin
 
 HOOK_EVENTS = [
     "plugins_loaded",
@@ -246,40 +244,32 @@ def get_registry():
     global _TEMP_DIR, _REGISTRY
     if _REGISTRY is None:
         _TEMP_DIR = tempfile.TemporaryDirectory(prefix="engine_hooks_test_")
-        write_zip(
+        write_plugin(
             _TEMP_DIR.name,
-            "hk1.zip",
+            "hk1",
             {
-                "hk1/__init__.py": "",
-                "hk1/components.py": _PLUGIN_SOURCE,
-                "hk1/types.py": 'TYPES = {"num": "数字"}\n',
+                "__init__.py": "",
+                "components.py": _PLUGIN_SOURCE,
+                "types.py": 'TYPES = {"num": "数字"}\n',
             },
         )
         _REGISTRY = Registry().load(_TEMP_DIR.name)
     return _REGISTRY
 
 
-def _release_zip(zip_str):
-    """释放 zipimport 与 importlib 留下的句柄，否则 Windows 删不掉临时目录。"""
-    while zip_str in sys.path:
-        sys.path.remove(zip_str)
+def _release_plugin(root):
+    """摘掉插件根并清模块，避免同名包在后续用例里串味。"""
+    while root in sys.path:
+        sys.path.remove(root)
     for name in [n for n in sys.modules if n == "hk1" or n.startswith("hk1.")]:
         del sys.modules[name]
     importlib.invalidate_caches()
-    for obj in gc.get_objects():
-        if isinstance(obj, zipfile.ZipFile) and str(obj.filename) == zip_str:
-            try:
-                obj.close()
-            except Exception:
-                pass
-    gc.collect()
 
 
 def cleanup():
     global _TEMP_DIR, _REGISTRY
     if _TEMP_DIR is not None:
-        zip_str = str((Path(_TEMP_DIR.name) / "hk1.zip").resolve())
-        _release_zip(zip_str)
+        _release_plugin(str(Path(_TEMP_DIR.name).resolve()))
         _TEMP_DIR.cleanup()
         _TEMP_DIR = None
     _REGISTRY = None

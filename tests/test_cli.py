@@ -26,7 +26,7 @@ from _harness import (
     plugin_source,
     run_cases,
     write_demo_data,
-    write_zip,
+    write_plugin,
 )
 
 PLUGINS = str(ROOT / "plugins")
@@ -151,11 +151,11 @@ def case_plugins_dir_before_after():
         dir_b = root / "b"
         dir_a.mkdir()
         dir_b.mkdir()
-        write_zip(
-            dir_a, "clia.zip", {"clia/__init__.py": "", "clia/components.py": plugin_source("clia")}
+        write_plugin(
+            dir_a, "clia", {"__init__.py": "", "components.py": plugin_source("clia")}
         )
-        write_zip(
-            dir_b, "clib.zip", {"clib/__init__.py": "", "clib/components.py": plugin_source("clib")}
+        write_plugin(
+            dir_b, "clib", {"__init__.py": "", "components.py": plugin_source("clib")}
         )
         before = call_cli(["-p", str(dir_a), "-p", str(dir_b), "plugins"])
         after = call_cli(["plugins", "-p", str(dir_a), "-p", str(dir_b)])
@@ -182,11 +182,15 @@ def case_plugins_dir_mixed():
         dir_b = root / "b"
         dir_a.mkdir()
         dir_b.mkdir()
-        write_zip(
-            dir_a, "climixa.zip", {"climixa/__init__.py": "", "climixa/components.py": plugin_source("climixa")}
+        write_plugin(
+            dir_a,
+            "climixa",
+            {"__init__.py": "", "components.py": plugin_source("climixa")},
         )
-        write_zip(
-            dir_b, "climixb.zip", {"climixb/__init__.py": "", "climixb/components.py": plugin_source("climixb")}
+        write_plugin(
+            dir_b,
+            "climixb",
+            {"__init__.py": "", "components.py": plugin_source("climixb")},
         )
         code, out, err = call_cli(["-p", str(dir_a), "plugins", "-p", str(dir_b)])
     check(code == 0, f"-p 混写应 exit 0，实际 {code}；stderr：{err!r}")
@@ -214,10 +218,10 @@ def _env_probe_source():
 
 
 def _write_env_probe(tmp):
-    write_zip(
+    write_plugin(
         tmp,
-        "envprobe.zip",
-        {"envprobe/__init__.py": "", "envprobe/components.py": _env_probe_source()},
+        "envprobe",
+        {"__init__.py": "", "components.py": _env_probe_source()},
     )
 
 

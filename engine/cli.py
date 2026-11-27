@@ -21,7 +21,7 @@ def _print_plugins(registry):
         return
     for info in registry.plugins.values():
         print(f"{info.name}  v{info.version}  {info.title}")
-        print(f"  zip : {info.source}")
+        print(f"  dir : {info.source}")
         for short, desc in info.types.items():
             print(f"  类型 : {info.name}_{info.version}@{short}  —— {desc}")
         for (plugin, name), entry in registry.components.items():
@@ -127,7 +127,7 @@ def _add_common_args(parser):
     """-p / -e / --hook：写在子命令前后都要生效，所以每个 parser 都挂一份。"""
     parser.add_argument(
         "-p", "--plugins-dir", action="append", metavar="DIR",
-        help="插件 zip 目录，可重复指定；默认扫描工程 plugins/",
+        help="插件根目录（存放插件子目录），可重复指定；默认扫描工程 plugins/",
     )
     parser.add_argument(
         "-e", "--env", action="append", metavar="KEY=VALUE",

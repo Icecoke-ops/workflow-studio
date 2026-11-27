@@ -1,8 +1,9 @@
-"""一条命令跑完全链路：打包插件 -> 加载 -> 校验 -> 执行 -> 断言。
+"""一条命令跑完全链路：加载目录插件 -> 校验 -> 执行 -> 断言。
 
     python tests/smoke.py
 
-插件 zip 和输出文件都落在系统临时目录，跑完清理，不往仓库里丢东西。
+直接加载仓库 ``plugins/`` 下的目录插件（契约 docs/CONTRACT.md §2.1），
+输出文件落在系统临时目录，不往仓库里丢东西。
 示例工作流里的 ``${workspace}`` 在这里指向临时目录，所以 SaveCSV 不会写到仓库根。
 """
 
@@ -20,7 +21,6 @@ from engine.api import PredictorModel  # noqa: E402
 from engine.registry import Registry  # noqa: E402
 from engine.runner import run  # noqa: E402
 from engine.workflow import validate  # noqa: E402
-from tools.build_plugins import build_all  # noqa: E402
 
 from _harness import DEMO_WORKFLOW  # noqa: E402
 
@@ -57,15 +57,11 @@ def main():
     temp = Path(tempfile.mkdtemp(prefix="wf_smoke_"))
     saved_workspace = os.environ.get("workspace")
     try:
-        plugin_dir = temp / "plugins"
         out_dir = temp / "out"
         out_dir.mkdir()
         os.environ["workspace"] = str(out_dir)
 
-        built = build_all(plugin_dir)
-        check(len(built) == 5, f"打包出 {len(built)} 个插件")
-
-        registry = Registry().load(plugin_dir)
+        registry = Registry().load(ROOT / "plugins")
         check(
             sorted(registry.plugins) == ["core", "fileio", "ml", "split", "std", "table"],
             f"插件集合 {sorted(registry.plugins)}",

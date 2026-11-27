@@ -237,7 +237,6 @@ async function removeEntry(entry, node) {
       <template #default="{ data }">
         <span class="tree-row">
           <span class="tree-name">{{ data.name }}</span>
-          <span v-if="data.kind === 'file' && /\.zip$/i.test(data.name)" class="tree-tag">插件</span>
         </span>
       </template>
     </el-tree>
@@ -293,7 +292,6 @@ async function removeEntry(entry, node) {
 .tree-row {
   display: flex;
   align-items: center;
-  gap: 6px;
   min-width: 0;
 }
 
@@ -301,15 +299,5 @@ async function removeEntry(entry, node) {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-
-.tree-tag {
-  flex: none;
-  padding: 0 5px;
-  border: 1px solid var(--border);
-  border-radius: 999px;
-  color: var(--muted);
-  font-size: 10px;
-  line-height: 14px;
 }
 </style>

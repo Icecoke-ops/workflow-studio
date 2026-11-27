@@ -189,13 +189,12 @@ class EngineService(ApiService):
             errors = list(self.load_errors)
         else:
             errors = []
-            plugin_dir = self._project.root / "plugins"
             for info in self.registry.plugins.values():
-                source = _plugin_source(info, plugin_dir)
+                source = _plugin_source(info)
                 if source is not None:
                     plugins[source] += 1
             skipped = [
-                {**item, "source": _skipped_source(item, plugin_dir)}
+                {**item, "source": _skipped_source(item)}
                 for item in self.registry.skipped
             ]
         return check_project(
@@ -236,15 +235,19 @@ def _failed(errors):
     return {"ok": False, "errors": list(errors), "warnings": [], "order": []}
 
 
-def _plugin_source(info, plugin_dir):
-    """插件来自全局 plugins/ 还是项目 plugins/；内置 std 不是目录里的插件。"""
+def _plugin_source(info):
+    """插件来自全局 plugins/ 还是项目 plugins/；内置 std 不是目录里的插件。
+
+    以物理目录判定：先认全局 DEFAULT_DIR（项目根就是仓库根、或项目 plugins/
+    是指向它的 junction 时，同一个目录都算 global），其余目录算 project。
+    """
     if info.source == "<builtin>":
         return None
-    return "project" if _same_dir(Path(info.source).parent, plugin_dir) else "global"
+    return "global" if _same_dir(Path(info.source).parent, DEFAULT_DIR) else "project"
 
 
-def _skipped_source(item, plugin_dir):
-    return "project" if _same_dir(Path(item["path"]).parent, plugin_dir) else "global"
+def _skipped_source(item):
+    return "global" if _same_dir(Path(item["path"]).parent, DEFAULT_DIR) else "project"
 
 
 def _same_dir(left, right):

@@ -2,7 +2,7 @@
 
 加载分两遍，插件之间没有加载顺序要求：
 
-1. 导入所有 zip，收集插件元数据和它声明的类型
+1. 导入所有插件，收集插件元数据和它声明的类型
 2. 类型全集就位后，再校验并解析每个组件的 schema
 """
 
@@ -16,13 +16,12 @@ from .api import Component
 from .errors import PluginLoadError, PluginNameConflict, SchemaError, WorkflowError
 from .loader import (
     PluginInfo,
+    _check_structure,
     _is_importable_top_level,
-    _package_name,
     _purge_modules,
     add_all_to_sys_path,
-    find_zips,
     load_plugin,
-    unmount_plugin,
+    scan_plugin_root,
     unmount_plugins,
 )
 from .typeid import qualify, resolve
@@ -50,63 +49,94 @@ class Registry:
         self.components = {}
         self.types = {}
         self.models = {}  # 类型标识 -> 必须继承的抽象基类
-        self.skipped = []  # 宽容模式跳过 / 未加载的 zip，按扫描顺序
+        self.skipped = []  # 非插件条目与（宽容模式下）加载失败的插件，按扫描顺序
 
     # -- 加载 ------------------------------------------------------------
     def load(self, *plugins_dirs, strict=True):
-        """加载插件目录；``strict=False`` 跳过坏 zip 并记进 ``self.skipped``。
+        """加载插件根目录；``strict=False`` 跳过坏插件并记进 ``self.skipped``。
 
-        宽容模式只跳过「这个 zip 不是插件 / 加载不进去」；同名冲突与
-        schema 不合法仍然是硬错误（那是真 bug，跳过等于静默降级）。
+        宽容模式只跳过「这个插件加载不进去」；同名冲突与 schema 不合法
+        仍然是硬错误（那是真 bug，跳过等于静默降级）。两种模式下，
+        没有 components.py 的子目录都进 skipped——它不是插件，不报错。
         """
         self._register_std()
         self.skipped = []
         unmount_plugins()
-        zip_paths = []
-        seen = set()
-        for plugins_dir in plugins_dirs:
-            for zip_path in find_zips(plugins_dir):
-                absolute = str(Path(zip_path).resolve())
-                if absolute in seen:
-                    continue
-                seen.add(absolute)
-                zip_paths.append(zip_path)
 
+        # 先收集全部根的插件目录：名字校验要在任何根挂上 sys.path 之前
+        # 一次性做完，否则先挂的根会让后面同名插件的检查误判。
+        roots = []
         candidates = []
-        for zip_path in zip_paths:
+        seen_roots = set()
+        seen_dirs = set()
+        for plugins_dir in plugins_dirs:
+            key = str(Path(plugins_dir).resolve())
+            if key in seen_roots:
+                continue
+            seen_roots.add(key)
+            scanned = scan_plugin_root(plugins_dir)
+            if scanned is None:
+                continue
+            plugin_dirs, not_plugins = scanned
+            roots.append(key)
+            for path, reason in not_plugins:
+                self._skip(path, reason)
+            for plugin_dir in plugin_dirs:
+                absolute = str(Path(plugin_dir).resolve())
+                if absolute in seen_dirs:
+                    continue
+                seen_dirs.add(absolute)
+                candidates.append(plugin_dir)
+
+        # 候选之间重名必须在任何校验/挂载之前拦住：结构校验失败的那份会被
+        # 跳过，但它仍是 sys.path 上的同名包，后来的同名插件会 import 到它的代码。
+        first_seen = {}
+        for plugin_dir in candidates:
+            package = plugin_dir.name
+            previous = first_seen.get(package)
+            if previous is not None:
+                raise PluginNameConflict(
+                    f"插件名重复：{package}（{previous} 与 {Path(plugin_dir).resolve()}）"
+                )
+            first_seen[package] = str(Path(plugin_dir).resolve())
+
+        valid = []
+        for plugin_dir in candidates:
+            package = plugin_dir.name
             try:
-                package = _package_name(zip_path)
+                if package == stdtypes.PLUGIN_NAME:
+                    raise PluginLoadError(
+                        f"{plugin_dir.name}: {package!r} 是引擎保留的命名空间，插件请换个名字"
+                    )
+                # 内置模块的 import 虽然顶不掉，但必须在 _purge_modules 之前拦住：
+                # 否则 sys.modules 里的真模块会先被删掉、再重建成残骸（sys 尤其致命）。
+                if package in sys.stdlib_module_names or _is_importable_top_level(package):
+                    raise PluginLoadError(
+                        f"{plugin_dir.name}: 插件名 {package!r} 与已安装的模块/标准库同名，"
+                        f"会顶掉对它的 import，请换一个名字"
+                    )
+                _check_structure(plugin_dir)
             except PluginLoadError as exc:
                 if strict:
                     raise
-                self._skip(zip_path, exc)
+                self._skip(plugin_dir, exc)
                 continue
-            # 内置模块的 import 虽然顶不掉，但必须在 _purge_modules 之前拦住：
-            # 否则 sys.modules 里的真模块会先被删掉、再重建成残骸（sys 尤其致命）。
-            if package in sys.stdlib_module_names or _is_importable_top_level(package):
-                message = (
-                    f"{zip_path.name}: 插件名 {package!r} 与已安装的模块/标准库同名，"
-                    f"会顶掉对它的 import，请换一个名字"
-                )
-                if strict:
-                    raise PluginLoadError(message)
-                self._skip(zip_path, message)
-                continue
-            candidates.append((zip_path, package))
+            valid.append((plugin_dir, package))
 
-        add_all_to_sys_path([zip_path for zip_path, _ in candidates])
+        add_all_to_sys_path(roots)
         infos = []
-        for zip_path, package in candidates:
+        for plugin_dir, package in valid:
             try:
-                info = load_plugin(zip_path, self.plugins)
+                info = load_plugin(plugin_dir, self.plugins)
             except PluginNameConflict:
                 raise
             except PluginLoadError as exc:
+                # 导入到一半失败的包不能留在 sys.modules 里当残骸；
+                # 插件根不能摘——同一根里还有别的插件要用。
+                _purge_modules(package)
                 if strict:
                     raise
-                self._skip(zip_path, exc)
-                unmount_plugin(zip_path)
-                _purge_modules(package)
+                self._skip(plugin_dir, exc)
                 continue
             self.plugins[info.name] = info
             infos.append(info)
@@ -116,11 +146,12 @@ class Registry:
             self._register(info)
         return self
 
-    def _skip(self, zip_path, reason):
+    def _skip(self, path, reason):
+        path = Path(path)
         self.skipped.append(
             {
-                "file": Path(zip_path).name,
-                "path": str(Path(zip_path).resolve()),
+                "file": path.name,
+                "path": str(path.resolve()),
                 "reason": str(reason),
             }
         )

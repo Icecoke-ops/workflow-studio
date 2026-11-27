@@ -6,7 +6,7 @@ class WorkflowError(Exception):
 
 
 class PluginLoadError(WorkflowError):
-    """插件 zip 加载失败。"""
+    """插件目录加载失败。"""
 
 
 class PluginNameConflict(PluginLoadError):

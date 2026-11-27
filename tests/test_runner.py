@@ -3,12 +3,10 @@
 直接运行：python tests/test_runner.py
 """
 
-import gc
 import importlib
 import os
 import sys
 import tempfile
-import zipfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -21,7 +19,15 @@ from engine.registry import Registry
 from engine.runner import run
 from engine.workflow import NodeSpec, Workflow, load_workflow, validate
 
-from _harness import DEMO_WORKFLOW, check, env_guard, expect_raises, run_cases, write_demo_data
+from _harness import (
+    DEMO_WORKFLOW,
+    check,
+    env_guard,
+    expect_raises,
+    run_cases,
+    write_demo_data,
+    write_plugin,
+)
 
 
 _RUNNER_SOURCE = '''\
@@ -283,36 +289,32 @@ def get_registry():
     global _TEMP_DIR, _REGISTRY
     if _REGISTRY is None:
         _TEMP_DIR = tempfile.TemporaryDirectory(prefix="engine_runner_test_")
-        zip_path = Path(_TEMP_DIR.name) / "rnp1.zip"
-        with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as archive:
-            archive.writestr("rnp1/__init__.py", "")
-            archive.writestr("rnp1/components.py", _RUNNER_SOURCE)
-            archive.writestr("rnp1/types.py", 'TYPES = {"num": "数字"}\n')
+        write_plugin(
+            _TEMP_DIR.name,
+            "rnp1",
+            {
+                "__init__.py": "",
+                "components.py": _RUNNER_SOURCE,
+                "types.py": 'TYPES = {"num": "数字"}\n',
+            },
+        )
         _REGISTRY = Registry().load(_TEMP_DIR.name)
     return _REGISTRY
 
 
-def _release_zip(zip_str):
-    """释放导入系统与 importlib.metadata 留下的 zip 句柄，否则 Windows 删不掉。"""
-    while zip_str in sys.path:
-        sys.path.remove(zip_str)
+def _release_plugin(root):
+    """摘掉插件根并清模块，避免同名包在后续用例里串味。"""
+    while root in sys.path:
+        sys.path.remove(root)
     for name in [n for n in sys.modules if n == "rnp1" or n.startswith("rnp1.")]:
         del sys.modules[name]
     importlib.invalidate_caches()
-    for obj in gc.get_objects():
-        if isinstance(obj, zipfile.ZipFile) and str(obj.filename) == zip_str:
-            try:
-                obj.close()
-            except Exception:
-                pass
-    gc.collect()
 
 
 def cleanup():
     global _TEMP_DIR, _REGISTRY
     if _TEMP_DIR is not None:
-        zip_str = str((Path(_TEMP_DIR.name) / "rnp1.zip").resolve())
-        _release_zip(zip_str)
+        _release_plugin(str(Path(_TEMP_DIR.name).resolve()))
         _TEMP_DIR.cleanup()
         _TEMP_DIR = None
     _REGISTRY = None

@@ -15,14 +15,14 @@ description: 当用户要求创建、编辑、校验、执行 workflow-studio �
 > **铁律（第一条）：不直接读写本地磁盘上的项目文件。**
 > 项目文件的读、写、改、建、删、改名、查版本，一律走 Studio 的 HTTP 接口。`read`/`write` 工具、shell 重定向、`os.` 直接改盘都禁止。
 
-为什么不能用本地文件工具（即使你就跑在这台机器上）：
+为什么不能用本地文件工具：
 
 1. **路径边界只在服务端执行**：相对路径、拒绝 `..`/绝对路径/盘符/链接越界，全在服务端；自己拼路径等于没有边界。
-2. **插件状态只在服务端**：加载了哪些 zip、同名插件直接报错、坏 zip 是否被跳过（`/api/project` 的 `skipped`），都是进程内状态。
+2. **插件状态只在服务端**：加载了哪些插件目录、同名插件直接报错、哪些子目录不是插件（`/api/project` 的 `skipped`），都是进程内状态。
 3. **校验与执行要同一份上下文**：`/api/validate` 与 `/api/run` 共用同一 registry；另跑 CLI 的插件集合与工作目录都可能不同。
 4. **智能体可能没有本地文件权限**：整个闭环必须只用 HTTP 完成；要落盘就让流程里的 `SaveCSV`/`SaveModel` 写，再 `GET /api/file` 读。
 
-`examples/e2e.py` 连输入文件 `data.csv` 也用 `POST /api/file` 写——示例本身在演示接口。
+`examples/e2e.py` 连输入文件也走 `POST /api/file`——示例本身在演示接口。
 
 ## 正确姿势（照抄；不要用 shell / 本地文件工具）
 
@@ -32,7 +32,7 @@ description: 当用户要求创建、编辑、校验、执行 workflow-studio �
 | 列项目目录 | `GET /api/tree?path=`（只列一层） | `ls`、`dir`、glob |
 | 读文件 | `GET /api/file?path=` | `read`、`cat`、`type` |
 | 查文件版本 | `GET /api/stat?path=` → `mtime_ns` | `stat`、`ls -l` |
-| 读插件与 schema | `GET /api/plugins` | 翻 `plugins/*.zip` 或仓库源码 |
+| 读插件与 schema | `GET /api/plugins` | 读 `plugins/<name>/` 源码、翻组件实现 |
 | 新建 / 覆盖文件 | `POST /api/file`（整文件） | `write`、`echo >` |
 | 新建目录 | `POST /api/mkdir` | `mkdir` |
 | 改名 | `POST /api/rename` | `mv`、`ren` |
@@ -170,7 +170,7 @@ curl -s -X POST http://127.0.0.1:51234/api/run \
 - `ok:false` 时看 `errors[0]` 与失败节点的 `nodes[].error`。
 - 没有取消接口：`/api/run` 会一直同步到你全部节点跑完。
 
-**插件 zip 变了必须重启**：launcher 只在项目子进程**启动时**加载一次插件。改了 `plugins/*.zip`（或新增插件）后：
+**插件目录变了必须重启**：launcher 只在项目子进程**启动时**加载一次插件，**不能热加载**。第三方插件 = 解压成**同名目录**（目录名必须等于 `PLUGIN_NAME`）放进 `plugins/`；改完目录里的代码同样要 restart 才生效：
 
 ```bash
 curl -s -X POST http://127.0.0.1:8765/api/projects/restart \

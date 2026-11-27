@@ -1,6 +1,6 @@
 # 完整开发环境（Studio 调试 + 官方示例插件）的第三方依赖。
 # 引擎本身零第三方依赖：只把 engine/ 拷走，什么都不用装就能跑命令行。
-# 各官方插件的依赖另见 plugins/src/<插件>/requirements.txt。
+# 各官方插件的依赖另见 plugins/<插件>/requirements.txt。
 
 # Studio 的调试钩子（hooks/http_debug）用它提供 WebSocket 服务。
 # 锁在实测过的 16.0：钩子直接用的是它的底层 API（ServerProtocol / ServerConnection），

@@ -194,7 +194,7 @@ Content-Type: application/json
 
 ### POST /api/projects/restart
 
-重启项目进程：同一个端口、新的 pid。**插件 zip 改动后必须走这里**（见 `SKILL.md` 五步闭环第 5 步）。
+重启项目进程：同一个端口、新的 pid。**插件目录改动后必须走这里**（见 `SKILL.md` 五步闭环第 5 步）。
 
 ```http
 POST http://127.0.0.1:8765/api/projects/restart
@@ -230,7 +230,7 @@ GET http://127.0.0.1:51234/api/health
 ```
 
 ```json
-{"ok": true, "engine": "0.7.1", "plugins": 6, "components": 27}
+{"ok": true, "engine": "0.8.0", "plugins": 6, "components": 27}
 ```
 
 ### GET /api/plugins
@@ -327,8 +327,8 @@ GET http://127.0.0.1:51234/api/project
 }
 ```
 
-- `plugins.global`：来自引擎自带 `plugins/`；`plugins.project`：来自本项目根下 `plugins/`。
-- `skipped`：坏 zip 被跳过时是 `[{"file": "...", "path": "...", "reason": "...", "source": "global"|"project"}]`。
+- `plugins.global`：来自引擎自带 `plugins/`；`plugins.project`：来自本项目根下 `plugins/`。插件是这两个根下的**子目录**（目录名 == 插件名），zip 不是加载格式。
+- `skipped`：被跳过的条目，形状 `[{"file": "...", "path": "...", "reason": "...", "source": "global"|"project"}]`。只表示**没有 `components.py` 的子目录**，或宽容模式下加载失败的插件；根下的 `*.zip` 等**文件**直接忽略，不会出现在这里。跳过不算错误，`ok` 仍为 `true`。
 - 插件加载失败时 `ok:false` 且 `errors` 非空（此时健康接口的 `plugins` 为 0）。
 
 ### GET /api/tree
@@ -659,7 +659,7 @@ POST http://127.0.0.1:51234/api/debug/stop
 
 | 参数 | 作用 |
 |---|---|
-| `-p, --plugins-dir DIR` | 插件 zip 目录，可重复；默认工程 `plugins/` |
+| `-p, --plugins-dir DIR` | 插件根目录（存放插件子目录），可重复指定；默认扫描工程 `plugins/` |
 | `-e, --env KEY=VALUE` | 设环境变量，可重复；在流程 `env` 之后覆盖，只对 `run` 生效 |
 | `--hook PATH` | 执行钩子（目录或 `.py`），最多一个，只对 `run` 生效 |
 
@@ -671,11 +671,11 @@ python -m engine plugins
 
 ```text
 std  v1.0  标准类型
-  zip : <builtin>
+  dir : <builtin>
   类型 : std_1.0@table  —— 表格数据（pandas.DataFrame）
   ...
 fileio  v1.0  数据读写
-  zip : <插件目录>/fileio.zip
+  dir : <插件目录>/fileio
   组件 : LoadCSV  读取 CSV
          读取 CSV 文件并转成表格，可切换编码
          出 table: std@table
@@ -837,7 +837,7 @@ ws://127.0.0.1:<port>/?token=<token>
   "type": "log",
   "node": "loadmodel",
   "stream": "stderr",
-  "text": "[警告] 模型 model.joblib 由引擎 v0.0.1 保存，当前引擎 v0.7.1；继续加载，若预测结果异常请重新训练并保存"
+  "text": "[警告] 模型 model.joblib 由引擎 v0.0.1 保存，当前引擎 v0.8.0；继续加载，若预测结果异常请重新训练并保存"
 }
 ```
 
@@ -869,7 +869,7 @@ ws://127.0.0.1:<port>/?token=<token>
 | 读二进制 / >1 MiB 文件 | 只回 `kind`（`binary`/`too_large`）与 `size`，`text` 为 `null` | 让流程用组件把结果缩成 CSV/文本再 `GET /api/file` 读；二进制内容不在本 skill 能力内 |
 | 递归列目录 / 全文搜索 | `tree` 只列一层，没有搜索接口 | 逐层 `GET /api/tree`；搜索先 `GET /api/file` 读文本，在内存里找 |
 | 免认证 / 远程访问 | 只绑 `127.0.0.1`、无认证、`Host` 白名单 | 只能本机调用；远程由用户在目标机起服务并自行转发（不在本 skill 范围） |
-| 直接改插件 / 改产品代码 | 不在 skill 职责内 | 重新打包 `plugins/*.zip` 后 `POST /api/projects/restart`；改代码找维护者 |
+| 直接改插件 / 改产品代码 | 不在 skill 职责内 | 改 `plugins/<插件名>/` 后 `POST /api/projects/restart`；改引擎代码找维护者 |
 
 ---
 

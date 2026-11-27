@@ -5,7 +5,6 @@
 
 import sys
 import tempfile
-import zipfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -16,7 +15,7 @@ from engine import schema as schema_mod
 from engine.errors import SchemaError
 from engine.registry import Registry
 
-from _harness import check, expect_raises, run_cases
+from _harness import check, expect_raises, run_cases, write_plugin
 
 
 def expect_errors(schema, values, *fragments):
@@ -328,13 +327,10 @@ COMPONENTS = [Bad]
 
 
 def load_bad_plugin(name, schema_text):
-    """在临时目录打一个坏插件 zip，加载它。"""
+    """在临时目录建一个坏插件目录，加载它。"""
     source = _BAD_PLUGIN_SOURCE % {"name": name, "schema": schema_text}
     with tempfile.TemporaryDirectory(prefix="engine_schema_test_") as tmp:
-        zip_path = Path(tmp) / f"{name}.zip"
-        with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as archive:
-            archive.writestr(f"{name}/__init__.py", "")
-            archive.writestr(f"{name}/components.py", source)
+        write_plugin(tmp, name, {"__init__.py": "", "components.py": source})
         Registry().load(tmp)
 
 

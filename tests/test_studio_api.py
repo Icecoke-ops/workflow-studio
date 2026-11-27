@@ -20,7 +20,6 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-import zipfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -54,6 +53,7 @@ from _harness import (  # noqa: E402
     port_open,
     wait_pid_gone,
     wait_port_closed,
+    write_zip,
 )
 
 DEMO = DEMO_WORKFLOW
@@ -616,7 +616,8 @@ def main():
                 failures.append(str(exc))
         check(
             not failures,
-            f"start→state→stop 连跑 20 次全过（{time.monotonic() - started:.1f}s，失败 {len(failures)} 次）",
+            f"start→state→stop 连跑 20 次全过（{time.monotonic() - started:.1f}s，"
+            f"失败 {len(failures)} 次，首条：{failures[0] if failures else ''}）",
         )
 
         # 17) 未知调试会话
@@ -721,13 +722,11 @@ def main():
         )
 
         # 22) 真实 Studio 进程把项目 plugins/ 与 -e 透传给调试子进程
-        probe_src = temp / "probe_src"
         probe_project = temp / "probe_project"
-        probe_plugins = probe_project / "plugins"
-        probe_src.mkdir()
-        probe_plugins.mkdir(parents=True)
-        (probe_src / "__init__.py").write_text("", encoding="utf-8")
-        (probe_src / "components.py").write_text(
+        probe_plugin = probe_project / "plugins" / "probe"
+        probe_plugin.mkdir(parents=True)
+        (probe_plugin / "__init__.py").write_text("", encoding="utf-8")
+        (probe_plugin / "components.py").write_text(
             "import os\n\n"
             "from engine.api import Component\n\n"
             "PLUGIN_NAME = 'probe'\n"
@@ -755,11 +754,6 @@ def main():
             "COMPONENTS = [Probe]\n",
             encoding="utf-8",
         )
-        with zipfile.ZipFile(
-            probe_plugins / "probe.zip", "w", zipfile.ZIP_DEFLATED
-        ) as archive:
-            archive.write(probe_src / "__init__.py", "probe/__init__.py")
-            archive.write(probe_src / "components.py", "probe/components.py")
 
         probe_port = free_port()
         probe_studio = subprocess.Popen(
@@ -940,16 +934,14 @@ def main():
 
         # 26) 项目根由 --serve 决定：从别处启动也按项目根解析 ${workspace} 与 plugins/
         project_root = temp / "startup_project"
-        rel_plugins = project_root / "plugins"
-        rel_plugins.mkdir(parents=True)
+        rel_plugin = project_root / "plugins" / "relprobe"
+        rel_plugin.mkdir(parents=True)
         elsewhere = temp / "elsewhere"
         elsewhere.mkdir()
         marker = "REL-WORKSPACE-MARKER-7f3a"
         (project_root / "rel_marker.txt").write_text(marker + "\n", encoding="utf-8")
-        relprobe_src = temp / "relprobe_src"
-        relprobe_src.mkdir()
-        (relprobe_src / "__init__.py").write_text("", encoding="utf-8")
-        (relprobe_src / "components.py").write_text(
+        (rel_plugin / "__init__.py").write_text("", encoding="utf-8")
+        (rel_plugin / "components.py").write_text(
             "from engine.api import Component, expand_env\n\n"
             "PLUGIN_NAME = 'relprobe'\n"
             "PLUGIN_VERSION = '0.1'\n"
@@ -975,9 +967,6 @@ def main():
             "COMPONENTS = [ReadMarker]\n",
             encoding="utf-8",
         )
-        with zipfile.ZipFile(rel_plugins / "relprobe.zip", "w", zipfile.ZIP_DEFLATED) as archive:
-            archive.write(relprobe_src / "__init__.py", "relprobe/__init__.py")
-            archive.write(relprobe_src / "components.py", "relprobe/components.py")
         rel_workflow = {
             "name": "rel-workspace",
             "nodes": [
@@ -1625,40 +1614,47 @@ def main():
             f"未知路由带大 body 仍回 404 JSON：{status} {not_found}",
         )
 
-        # 32) 项目 plugins 里的非插件 zip：skipped 一条、source=project、ok:true
-        skipped_project = temp / "skipped_project"
-        (skipped_project / "plugins").mkdir(parents=True)
-        with zipfile.ZipFile(
-            skipped_project / "plugins" / "not_a_plugin.zip", "w"
-        ) as archive:
-            archive.writestr("readme.txt", "not a plugin")
-        skipped_studio = None
+        # 32) 项目 plugins：非插件目录进 skipped（source=project）；根下文件（含 zip）不参与扫描
+        # 契约 §2.1：插件 = 插件根下的子目录；没有 components.py 的子目录进 skipped。
+        unrelated_project = temp / "unrelated_project"
+        project_plugins = unrelated_project / "plugins"
+        (project_plugins / "not_a_plugin").mkdir(parents=True)
+        (project_plugins / "not_a_plugin" / "readme.txt").write_text(
+            "not a plugin", encoding="utf-8"
+        )
+        write_zip(
+            project_plugins, "stale_plugin.zip", {"stale_plugin/__init__.py": ""}
+        )
+        unrelated_studio = None
         try:
-            skipped_studio, skipped_api, _ = start_studio(skipped_project)
-            status, _, body = skipped_api.json("/api/project")
+            unrelated_studio, unrelated_api, _ = start_studio(unrelated_project)
+            status, _, body = unrelated_api.json("/api/project")
             check(
                 status == 200
                 and body["ok"] is True
                 and len(body["skipped"]) == 1
-                and body["skipped"][0]["file"] == "not_a_plugin.zip"
-                and body["skipped"][0]["source"] == "project",
-                f"项目 plugins 里的坏 zip 进 skipped：{body['skipped']}",
+                and body["skipped"][0]["file"] == "not_a_plugin"
+                and body["skipped"][0]["source"] == "project"
+                and isinstance(body["skipped"][0]["reason"], str)
+                and body["skipped"][0]["reason"],
+                f"项目 plugins 里的非插件目录进 skipped：{body['skipped']}",
             )
-            status, _, health_body = skipped_api.json("/api/health")
+            check(
+                body["plugins"] == {"global": 5, "project": 0},
+                f"根下 zip 不参与扫描，全局插件照常加载：{body['plugins']}",
+            )
+            status, _, health_body = unrelated_api.json("/api/health")
             check(
                 health_body["plugins"] == 6,
-                f"跳过坏 zip 后仍有 6 个插件：{health_body}",
+                f"跳过非插件目录后仍是 6 个插件（std + 全局 5）：{health_body}",
             )
         finally:
-            if skipped_studio is not None:
-                stop_studio(skipped_studio)
+            if unrelated_studio is not None:
+                stop_studio(unrelated_studio)
 
         # 33) 与全局插件同名：project() ok:false、计数 0，文件接口照常
         conflict_project = temp / "conflict_project"
-        (conflict_project / "plugins").mkdir(parents=True)
-        shutil.copyfile(
-            DEFAULT_DIR / "core.zip", conflict_project / "plugins" / "core.zip"
-        )
+        shutil.copytree(DEFAULT_DIR / "core", conflict_project / "plugins" / "core")
         conflict_studio = None
         try:
             conflict_studio, conflict_api, _ = start_studio(conflict_project)
@@ -1675,9 +1671,8 @@ def main():
             )
             check("插件名重复" in joined, f"错误含插件名重复：{joined}")
             check(
-                str((DEFAULT_DIR / "core.zip").resolve()) in joined
-                and str((conflict_project / "plugins" / "core.zip").resolve())
-                in joined,
+                str((DEFAULT_DIR / "core").resolve()) in joined
+                and str((conflict_project / "plugins" / "core").resolve()) in joined,
                 f"错误含两个绝对路径：{joined}",
             )
             status, _, body = conflict_api.json("/api/validate", {"workflow": raw})

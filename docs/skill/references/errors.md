@@ -116,10 +116,13 @@ elif not body.get("ok"):  # 业务层
 | 文案 | 场景 | 改法 |
 |---|---|---|
 | `项目未运行：D:\work\demo` | close/restart 传了没打开的项目 | 先 `POST /api/projects`；`root` 用绝对目录，不是 `url` |
+| `插件名重复：table（D:\workflow-studio\plugins\table 与 D:\work\demo\plugins\table）` | 全局与项目插件根（或两个 `-p` 目录）出现同名插件目录，加载硬报错：`/api/project` 回 `ok:false`、`errors` 带两个绝对路径，`health` 插件数归零，但文件接口照常可用 | 删掉或改名其中一个目录，再 `POST /api/projects/restart` |
 | `端口被占用，重启失败` | 旧进程端口没释放又被别人抢走 | 再试一次 restart；仍失败就 `POST /api/projects/close` 后重新 `POST /api/projects`（会分配新的随机端口；`restart` 没有换端口参数） |
 | `未知调试会话：nope` | `debug/stop` 的 `session` 不对 | 用 `debug/start` 返回的 `session` |
 | `调试子进程提前退出（exit code 1）` | 工作流不合法，或钩子依赖缺失（例如没装 `websockets`——它在 import 阶段就报 `HookError` 退出，不会等到 10 秒） | 看 `errors` 后几条 stderr；先用 `/api/validate` 验一遍；缺依赖就装 `requirements.txt` |
 | `调试子进程 10 秒内没有写出端口文件` | 机器慢、插件加载慢，或端口文件写入失败 | 重试一次；看 stderr 尾部；确认系统临时目录可写、没有被安全软件拦截 |
+
+**插件根下的 `*.zip`（不是错误，也不进 `skipped`）**：引擎只扫插件根下的**子目录**，zip 与其它文件一律忽略、不报错、不出现在 `skipped` 里。装第三方插件：把 zip 解压成**同名目录**放进插件根（目录名必须等于 `PLUGIN_NAME`），再 `POST /api/projects/restart`；改目录里的代码同样只能 restart 生效（不能热加载）。进 `skipped` 的只有两类：没有 `components.py` 的子目录，以及宽容模式下加载失败的插件（缺依赖、缺 `__init__.py`、import 报错等，各带自己的原因）。
 
 ---
 
@@ -172,7 +175,7 @@ elif not body.get("ok"):  # 业务层
 4. `GET /api/plugins` 里有没有你用的 `plugin` + `component` → 没有就是名字错或插件没进 `plugins/`。
 5. `POST /api/validate` 拿全量错误 → 按第 3 节逐条改。
 6. 校验过了再 `POST /api/run`；节点失败看 `nodes[].error`。
-7. 改过 `plugins/*.zip` → `POST /api/projects/restart` 再试（否则仍是旧代码）。
+7. 改过 `plugins/<插件名>/` → `POST /api/projects/restart` 再试（否则仍是旧代码）。
 
 ---
 

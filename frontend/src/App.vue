@@ -610,7 +610,13 @@ async function loadProject() {
   project.value = info.project
   projectDegraded.value = info.degraded
   projectErrors.value = info.errors
-  if (data.skipped?.length) ElMessage.warning(`有 ${data.skipped.length} 个插件未能加载`)
+  // skipped 多数是「子目录不是插件」（正常情况），少数是宽容模式下加载失败的插件；中性提示，不报警
+  if (data.skipped?.length) {
+    const names = data.skipped.map((item) => item.file).filter(Boolean)
+    const shown = names.slice(0, 3).join('、')
+    const more = names.length > 3 ? ' 等' : ''
+    ElMessage.info(`跳过 ${data.skipped.length} 项：${shown}${more}`)
+  }
 }
 
 async function confirmDiscard() {

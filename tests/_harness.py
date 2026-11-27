@@ -1,4 +1,4 @@
-"""测试公共设施：断言、异常匹配、用例循环、进程/端口探针，以及临时插件 zip 夹具。
+"""测试公共设施：断言、异常匹配、用例循环、进程/端口探针，以及临时插件夹具。
 
 每个 test_*.py 只保留自己的用例，跑测循环统一走这里。
 """
@@ -318,7 +318,22 @@ def source_node(directory, node_id="n1", filename="data.csv"):
     }
 
 
+def write_plugin(root, package, entries):
+    """把 {插件目录内相对路径: 文本} 写成 root/<package>/ 目录插件，返回插件目录。
+
+    entries 的键相对插件目录（``components.py``、``impl/thing.py``…），
+    契约见 docs/CONTRACT.md §2.1。
+    """
+    base = Path(root) / package
+    for rel, content in entries.items():
+        target = base / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content, encoding="utf-8")
+    return base
+
+
 def write_zip(directory, filename, entries):
+    """打一个插件 zip 文件：只给「插件根下的文件不参与扫描」的夹具用。"""
     path = Path(directory) / filename
     with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as archive:
         for name, content in entries.items():

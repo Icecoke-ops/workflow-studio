@@ -2,8 +2,7 @@
 __pycache__/
 *.py[cod]
 
-# 构建产物：由 tools/build_plugins.py 和 tools/build_web.py 生成
-plugins/*.zip
+# 构建产物：由 tools/build_web.py 生成
 frontend/dist/
 studio/web/
 dist/

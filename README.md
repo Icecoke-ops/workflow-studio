@@ -8,7 +8,7 @@
 
 - **引擎薄，插件厚**：引擎不理解业务，只负责加载、校验、排序、执行。
 - **JSON 是唯一事实来源**：一个工作流就是一个 JSON 文件，没有数据库、没有隐藏状态。工作流文件习惯用 `.flow` 后缀，内容仍是 JSON；引擎按内容解析，不看扩展名。
-- **插件是 zip 包**：`plugins/<插件名>.zip`，声明与实现分离。
+- **插件是目录**：`plugins/<插件名>/`，目录名 == `PLUGIN_NAME`，声明与实现分离。zip 只作传输用途，引擎不再加载 zip。
 - **类型不写进工作流**：端口类型来自插件 schema，JSON 里只写连到哪个节点的哪个端口。
 - **只管 DAG**：循环暂不支持，有环直接报错。
 - **引擎能独立跑**：只把 `engine/` 拷走就能用，不依赖 studio、frontend，也不依赖任何具体插件。
@@ -18,15 +18,15 @@
 | 目录 | 内容 |
 |---|---|
 | `engine/` | 工作流引擎：加载、校验、排序、执行、CLI，零第三方依赖 |
-| `plugins/src/fileio/` | 数据读写：CSV / JSON / Excel 的加载与保存（5 个组件） |
-| `plugins/src/table/` | 数据处理：选列改列、过滤排序、缺失值、值计数（11 个组件） |
-| `plugins/src/split/` | 数据划分：切训练/测试集、按列拆特征 X 与目标 Y（2 个组件） |
-| `plugins/src/ml/` | 机器学习：5 个回归模型、回归评估、模型保存与加载（依赖 scikit-learn、joblib） |
-| `plugins/src/core/` | 模型应用：`PredictModel`，接任何符合 `std_1.0@model` 的模型 |
+| `plugins/fileio/` | 数据读写：CSV / JSON / Excel 的加载与保存（5 个组件） |
+| `plugins/table/` | 数据处理：选列改列、过滤排序、缺失值、值计数（11 个组件） |
+| `plugins/split/` | 数据划分：切训练/测试集、按列拆特征 X 与目标 Y（2 个组件） |
+| `plugins/ml/` | 机器学习：5 个回归模型、回归评估、模型保存与加载（依赖 scikit-learn、joblib） |
+| `plugins/core/` | 模型应用：`PredictModel`，接任何符合 `std_1.0@model` 的模型 |
 | `studio/` | 本地 Web 后端（标准库 `ThreadingHTTPServer`）：落地页、项目服务、前端构建产物 |
 | `hooks/` | 执行钩子：日志、调试服务。与 `plugins/` 同级，**不进引擎包**，可单独分发 |
 | `frontend/` | Vite + Vue 3 可视化编辑器源码 |
-| `tools/` | 打包插件、构建前端 |
+| `tools/` | 构建前端 |
 | `tests/` | 测试套件；`tests/fixtures/` 放示例工作流等夹具 |
 | `docs/` | 对外契约文档 |
 
@@ -54,13 +54,9 @@
 pip install -r requirements.txt
 ```
 
-**1. 打包插件**（源码在 `plugins/src/`，打包成 `plugins/*.zip`）
+官方插件源码就是 `plugins/<插件名>/` 目录，无需打包。装第三方插件：把它的 zip 传输包解压成**同名目录**（目录名必须等于 `PLUGIN_NAME`）放进 `plugins/`；改目录里的代码后重启项目才生效，不能热加载。
 
-```bash
-python tools/build_plugins.py
-```
-
-**2. 准备数据**
+**1. 准备数据**
 
 示例工作流 `tests/fixtures/regression_demo.flow` 从 `${workspace}/data.csv` 读数据，仓库不附带任何数据文件。在工作目录放一个两列 CSV 就行，`x` 是特征、`y` 是目标：
 
@@ -71,7 +67,7 @@ x,y
 2.0,4.9
 ```
 
-**3. 命令行跑一个工作流**
+**2. 命令行跑一个工作流**
 
 ```bash
 python -m engine plugins                          # 列出插件、类型、组件和端口
@@ -89,7 +85,7 @@ python -m engine run tests/fixtures/regression_demo.flow
 python -m engine run --plugins-dir D:\workspace\space --plugins-dir C:\analy_env auto_analy.json
 ```
 
-每个目录只扫一层 `*.zip`，不递归。目录不存在只警告并跳过，不中断。想只用自定义目录，把工程里的 `plugins/` 删掉即可。不同目录出现同名插件会直接报错，不会静默覆盖。
+每个目录只扫一层**插件目录**（子目录），不递归。目录不存在只警告并跳过，不中断。想只用自定义目录，把工程里的 `plugins/` 删掉即可。不同目录出现同名插件会直接报错，不会静默覆盖；没有 `components.py` 的子目录不是插件，进 `skipped` 并给出原因；插件根下的 `*.zip` 等文件直接忽略，不加载也不报错。
 
 **环境变量**
 
@@ -112,7 +108,7 @@ self.path = expand_env(config["path"])    # "${workspace}/data/sales.csv"
 
 工作流自己需要的配置也能写在 JSON 顶层 `env` 里，可视化编辑器顶栏有「环境变量」按钮可以图形化编辑。
 
-**4. 起可视化编辑器**
+**3. 起可视化编辑器**
 
 ```bash
 npm --prefix frontend install      # 首次需要
@@ -123,8 +119,8 @@ python -m studio                   # 起落地页，默认 8765
 打开 <http://127.0.0.1:8765>，在落地页选一个项目目录（或直接输入路径），项目会以一个独立子进程、随机端口打开工作台的新标签页：左侧资源管理器直接读写该目录，`.flow` 进画布，其它文本只读预览，`Ctrl+S` 保存回盘。
 
 - 一个项目一个进程，可以同时开多个项目，各占一个浏览器标签页，互不干扰。
-- 项目目录下的 `plugins/*.zip` 是项目插件，与引擎旁 `plugins/` 的全局插件一起加载；同名插件直接报错标出，非插件 zip 跳过并提示。
-- 换掉或新增插件后点「重启项目」让插件生效（zip 会被 zipimport 缓存，只能重启进程）。「关闭项目」结束对应子进程，落地页不受影响。
+- 项目目录下的 `plugins/` 是项目插件根，与引擎旁 `plugins/` 的全局插件一起加载；同名插件直接报错标出，没有 `components.py` 的子目录跳过并提示，根下的 zip 等文件直接忽略。
+- 换掉或新增插件后点「重启项目」让插件生效（进程内的 import 有缓存，只能重启进程）。「关闭项目」结束对应子进程，落地页不受影响。
 - 落地页与项目服务都只绑 `127.0.0.1`，并拒绝非本机 `Host` 与跨源 POST：服务没有认证，能连上端口的人就能调 `/api/run`、读写项目文件，所以不提供局域网暴露。
 
 改完前端代码后重新执行 `python tools/build_web.py` 即可，刷新页面生效。
@@ -167,8 +163,8 @@ python -m studio                   # 起落地页，默认 8765
 ## 写一个插件
 
 ```
-plugins/src/myp/          # 目录名必须等于 PLUGIN_NAME
-├── __init__.py           # 必须有：zipimport 不支持隐式命名空间包
+plugins/myp/              # 目录名必须等于 PLUGIN_NAME
+├── __init__.py           # 必须有：每个含 .py 的目录都要有 __init__.py
 ├── requirements.txt      # 第三方依赖，一行一个
 ├── components.py         # 只放声明：PLUGIN_NAME / PLUGIN_VERSION / PLUGIN_TITLE / COMPONENTS
 └── impl/                 # 组件实现，一个组件一个文件
@@ -202,7 +198,7 @@ class MyComponent(Component):
 
 类型标识是 `插件名_版本@类型名`，例如 `std_1.0@table`。插件内可以直接写短名（`table`）表示自己的类型，写全名表示引用别的插件的类型。引擎内置 `std` 命名空间提供 `table` / `number` / `string` / `boolean` / `model` 五个标准类型。
 
-打包就是把 `plugins/src/myp/` 打成 `plugins/myp.zip`，`python tools/build_plugins.py` 会校验目录名与 `PLUGIN_NAME` 是否一致。
+写好即用：目录放进 `plugins/` 就会被加载，目录名必须与 `PLUGIN_NAME` 一致。要分发就打成 zip 传输，对方解压成同名目录放进自己的 `plugins/`。
 
 完整的字段规则（schema 里每个键的含义、类型规则、工作流字段白名单）看 **[docs/CONTRACT.md](docs/CONTRACT.md)**。
 

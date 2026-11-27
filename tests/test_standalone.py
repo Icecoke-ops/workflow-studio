@@ -17,7 +17,7 @@ from engine.registry import Registry
 from engine.runner import run
 from engine.workflow import validate
 
-from _harness import check, plugin_source, run_cases, write_zip
+from _harness import check, plugin_source, run_cases, write_plugin
 
 
 def case_missing_dir_only_std():
@@ -53,8 +53,10 @@ def case_third_party_plugin_runs():
             output_schema='{"result": {"type": "std_1.0@number"}}',
             invoke_body='return {"result": 42}',
         )
-        write_zip(
-            tmp, "solo.zip", {"solo/__init__.py": "", "solo/components.py": source}
+        write_plugin(
+            tmp,
+            "solo",
+            {"__init__.py": "", "components.py": source},
         )
         registry = Registry().load(tmp)
         check(
