@@ -1,9 +1,15 @@
 <script setup>
-import { computed } from 'vue'
+import { computed, ref, watch } from 'vue'
+import { fetchFile, payloadErrors } from '../api'
+import { useFileSync } from '../fileWatch'
+import FileSyncBar from './FileSyncBar.vue'
 
 const props = defineProps({
-  doc: { type: Object, required: true },
+  path: { type: String, required: true },
 })
+
+const file = ref(null)
+const error = ref('')
 
 function formatSize(size) {
   if (!Number.isFinite(size)) return ''
@@ -13,18 +19,55 @@ function formatSize(size) {
 }
 
 const notice = computed(() => {
-  if (props.doc.fileKind === 'binary') return '不是 UTF-8 文本（或含二进制数据），不能以文本方式显示。'
-  if (props.doc.fileKind === 'too_large') {
-    return `文件太大（${formatSize(props.doc.size)}），不在浏览器里打开。`
+  if (!file.value) return ''
+  if (file.value.kind === 'binary') return '不是 UTF-8 文本（或含二进制数据），不能以文本方式显示。'
+  if (file.value.kind === 'too_large') {
+    return `文件太大（${formatSize(file.value.size)}），不在浏览器里打开。`
   }
   return ''
 })
+
+/** 读一次文件；成功返回 true。 */
+async function load() {
+  try {
+    const data = await fetchFile(props.path)
+    if (data.ok === false) throw new Error(payloadErrors(data))
+    file.value = data
+    error.value = ''
+    return true
+  } catch (err) {
+    file.value = null
+    error.value = `读取失败：${err.message}`
+    return false
+  }
+}
+
+async function reloadFile() {
+  if (await load()) markSynced()
+}
+
+const { changed, missing, reload, markSynced } = useFileSync(() => props.path, reloadFile)
+
+watch(
+  () => props.path,
+  () => {
+    file.value = null
+    error.value = ''
+    void load()
+  },
+  { immediate: true },
+)
 </script>
 
 <template>
   <section class="text-viewer">
-    <div v-if="notice" class="text-notice">{{ notice }}</div>
-    <pre v-else class="text-body">{{ doc.text }}</pre>
+    <FileSyncBar :changed="changed" :missing="missing" @reload="reload" />
+    <div class="text-scroll">
+      <div v-if="error" class="text-notice">{{ error }}</div>
+      <div v-else-if="notice" class="text-notice">{{ notice }}</div>
+      <pre v-else-if="file" class="text-body">{{ file.text }}</pre>
+      <div v-else class="text-notice">加载中…</div>
+    </div>
   </section>
 </template>
 
@@ -34,8 +77,14 @@ const notice = computed(() => {
   flex-direction: column;
   height: 100%;
   min-width: 0;
-  overflow: auto;
+  overflow: hidden;
   background: var(--panel);
+}
+
+.text-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
 }
 
 .text-notice {

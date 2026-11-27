@@ -140,6 +140,11 @@ export async function fetchFile(path) {
   return request(`/file?path=${encodeURIComponent(path)}`)
 }
 
+/** 文件版本：{ok, path, kind:"file"|"missing"|"dir", size, mtime_ns}，用于发现外部改动。 */
+export async function statFile(path) {
+  return request(`/stat?path=${encodeURIComponent(path)}`)
+}
+
 /** 新建或覆盖文本文件。 */
 export async function writeFile(path, text) {
   return request('/file', {

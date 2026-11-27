@@ -7,6 +7,7 @@ import ComponentNode from './components/ComponentNode.vue'
 import CollapsedRail from './components/CollapsedRail.vue'
 import ContextMenu from './components/ContextMenu.vue'
 import EnvDrawer from './components/EnvDrawer.vue'
+import FileSyncBar from './components/FileSyncBar.vue'
 import GraphCanvas from './components/GraphCanvas.vue'
 import GroupFrame from './components/GroupFrame.vue'
 import GroupNode from './components/GroupNode.vue'
@@ -32,6 +33,7 @@ import { collectCopy, planPaste } from './clipboard'
 import { DebugClient } from './debug/client.js'
 import { EMPTY_VIEW, appendLog, applyState, isBusy } from './debug/model.js'
 import { isFlowPath, normalizePath, titleFromPath } from './documents'
+import { useFileSync, versionFromSave } from './fileWatch'
 import { normalizeProject } from './project'
 import {
   canGroup,
@@ -510,6 +512,18 @@ const dirty = computed(() => {
   return Boolean(doc && doc.kind === 'flow' && doc.savedSignature !== contentSignature.value)
 })
 
+// 流程图文档才轮询磁盘版本；未保存的改动会在重载确认里明说会丢
+const {
+  changed: diskChanged,
+  missing: diskMissing,
+  reload: reloadFromDisk,
+  markSynced: markDiskSynced,
+} = useFileSync(
+  () => (activeDoc.value?.kind === 'flow' ? activeDoc.value.path : ''),
+  reloadDocument,
+  { canReload: () => !dirty.value },
+)
+
 function importEnv(raw) {
   if (raw.env === undefined) {
     workflowEnv.value = []
@@ -613,56 +627,74 @@ async function confirmDiscard() {
   }
 }
 
+/** 画布重建后：清掉旧选中、等两帧让 ResizeObserver 量出尺寸再取景。 */
+async function settleGraph() {
+  await nextTick()
+  // 复用同 id 的 Vue Flow 节点对象时旧的 selected 会残留，显式清一次
+  graphRef.value?.clearSelection?.()
+  // 新节点要等 ResizeObserver 量出尺寸；等两帧再 fitView，否则 0×0 会 no-op
+  await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)))
+  graphRef.value?.fitView?.({ padding: 0.2 })
+}
+
+/** 读一个 .flow 文件并重建画布；失败只提示、不动画布，返回是否成功。 */
+async function loadFlowFile(path, action) {
+  let file
+  try {
+    file = await fetchFile(path)
+    if (file.ok === false) throw new Error(payloadErrors(file))
+    if (file.kind !== 'text') {
+      throw new Error(file.kind === 'too_large' ? '文件太大，无法打开。' : '不是文本文件。')
+    }
+  } catch (err) {
+    ElMessage.error(`${action}失败：${err.message}`)
+    return false
+  }
+  try {
+    applyWorkflow(JSON.parse(file.text))
+  } catch (err) {
+    ElMessage.error(`${action}失败：${err.message}`)
+    return false
+  }
+  return true
+}
+
 async function openDocument(rawPath) {
   const path = normalizePath(rawPath)
   if (!path || activeDoc.value?.path === path) return
   if (!(await confirmDiscard())) return
   await stopDebug()
 
-  let file
-  try {
-    file = await fetchFile(path)
-    if (file.ok === false) throw new Error(payloadErrors(file))
-  } catch (err) {
-    ElMessage.error(`打开失败：${err.message}`)
-    return
-  }
-
-  if (isFlowPath(path)) {
-    if (file.kind !== 'text') {
-      ElMessage.error(file.kind === 'too_large' ? '文件太大，无法打开。' : '不是文本文件。')
-      return
-    }
-    try {
-      applyWorkflow(JSON.parse(file.text))
-    } catch (err) {
-      ElMessage.error(`打开失败：${err.message}`)
-      return
-    }
-    // 签名取「载入完成」这一刻：下面还要等两帧，期间画布若被改动不能算进已保存
-    const signature = contentSignature.value
-    const doc = { id: path, path, title: titleFromPath(path), kind: 'flow', savedSignature: signature }
-    docs.value = [doc]
+  if (!isFlowPath(path)) {
+    // 非流程图不在这里取内容：TextViewer 自己加载并轮询，binary/too_large 由它提示
+    docs.value = [{ id: path, path, title: titleFromPath(path), kind: 'text' }]
     activeId.value = path
-    await nextTick()
-    // 复用同 id 的 Vue Flow 节点对象时旧的 selected 会残留，显式清一次
-    graphRef.value?.clearSelection?.()
-    // 新节点要等 ResizeObserver 量出尺寸；等两帧再 fitView，否则 0×0 会 no-op
-    await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)))
-    graphRef.value?.fitView?.({ padding: 0.2 })
     return
   }
 
-  docs.value = [{
+  if (!(await loadFlowFile(path, '打开'))) return
+  // 签名取「载入完成」这一刻：下面还要等两帧，期间画布若被改动不能算进已保存
+  const doc = {
     id: path,
     path,
     title: titleFromPath(path),
-    kind: 'text',
-    text: file.text,
-    fileKind: file.kind,
-    size: file.size,
-  }]
+    kind: 'flow',
+    savedSignature: contentSignature.value,
+  }
+  docs.value = [doc]
   activeId.value = path
+  await settleGraph()
+}
+
+/** 磁盘上的文件被外部改过：重新读回来重建画布，并清掉 dirty。 */
+async function reloadDocument() {
+  const doc = activeDoc.value
+  if (!doc || doc.kind !== 'flow') return
+  await stopDebug()
+  if (!(await loadFlowFile(doc.path, '重新加载'))) return
+  doc.savedSignature = contentSignature.value
+  await settleGraph()
+  if (activeDoc.value === doc) markDiskSynced()
 }
 
 async function saveDocument() {
@@ -681,6 +713,8 @@ async function saveDocument() {
     const data = await writeFile(doc.path, `${JSON.stringify(workflow, null, 2)}\n`)
     if (data.ok === false) throw new Error(payloadErrors(data))
     doc.savedSignature = signature
+    // 保存期间可能已经切走文档：版本基线只回填给还在前台的那一份，别记到别人头上
+    if (activeDoc.value === doc) markDiskSynced(versionFromSave(data))
     ElMessage.success(`已保存 ${doc.title}`)
   } catch (err) {
     ElMessage.error(`保存失败：${err.message}`)
@@ -1093,22 +1127,29 @@ onBeforeUnmount(() => {
         @expand="togglePanel('left')"
       />
 
-      <GraphCanvas
-        v-if="activeDoc && activeDoc.kind === 'flow'"
-        ref="graphRef"
-        v-model:nodes="nodes"
-        :edges="canvasEdges"
-        class="canvas"
-        :node-types="nodeTypes"
-        @connect="onConnect"
-        @drop-component="addNode"
-        @remove-edges="onEdgesRemoved"
-        @selection-change="onSelectionChange"
-        @copy="copySelection"
-        @paste="pasteClipboard"
-        @context-menu="onCanvasContextMenu"
-      />
-      <TextViewer v-else-if="activeDoc" :doc="activeDoc" class="canvas" />
+      <div v-if="activeDoc && activeDoc.kind === 'flow'" class="canvas-host">
+        <GraphCanvas
+          ref="graphRef"
+          v-model:nodes="nodes"
+          :edges="canvasEdges"
+          class="canvas"
+          :node-types="nodeTypes"
+          @connect="onConnect"
+          @drop-component="addNode"
+          @remove-edges="onEdgesRemoved"
+          @selection-change="onSelectionChange"
+          @copy="copySelection"
+          @paste="pasteClipboard"
+          @context-menu="onCanvasContextMenu"
+        />
+        <FileSyncBar
+          class="canvas-sync"
+          :changed="diskChanged"
+          :missing="diskMissing"
+          @reload="reloadFromDisk"
+        />
+      </div>
+      <TextViewer v-else-if="activeDoc" :path="activeDoc.path" class="canvas" />
       <div v-else class="canvas empty-doc">
         <p>从左侧资源管理器打开一个 <code>.flow</code> 文件</p>
         <p class="muted small">右键目录可以新建流程图。</p>
@@ -1296,6 +1337,26 @@ onBeforeUnmount(() => {
 .canvas {
   flex: 1;
   min-width: 0;
+}
+
+/* 画布 + 磁盘改动提示条：提示条浮在画布顶部，不挤压 Vue Flow 的尺寸 */
+.canvas-host {
+  position: relative;
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+}
+
+.canvas-sync {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  right: 8px;
+  z-index: 5;
+  overflow: hidden;
+  border-radius: 4px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
 }
 
 .resize-handle {
