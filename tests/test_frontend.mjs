@@ -1,4 +1,5 @@
-// 前端纯函数测试：直接 import frontend/src 下的 ESM 模块，不依赖 Vue 运行时。
+// 前端纯函数测试：直接 import frontend/src 下的 ESM 模块（fileWatch.js 会连带加载
+// Vue/element-plus，这里只测其中的纯函数）。
 // 运行：node tests/test_frontend.mjs
 
 import { envToRows, rowsToEnv, envError, attachEnv } from '../frontend/src/workflow.js'
@@ -40,6 +41,11 @@ import {
   newFlowText,
 } from '../frontend/src/documents.js'
 import { normalizeProject } from '../frontend/src/project.js'
+import {
+  sameVersion,
+  versionFromStat,
+  versionFromSave,
+} from '../frontend/src/fileWatch.js'
 import {
   fetchHealth,
   fetchPlugins,
@@ -2124,6 +2130,78 @@ addCase('project normalizeProject errors 只留非空字符串、ok 非 false �
     )
   }
   check(normalizeProject({ root: 'r', ok: false }).degraded === true, 'ok:false 必须降级')
+})
+
+// ---- fileWatch.js（文件版本比较；/api/stat 与保存响应归一化） ----
+
+addCase('fileWatch sameVersion 只有 size 与 mtime 都相同才算同版', () => {
+  // 用可精确表示的整数做「不同 mtime」；真实 mtime_ns 超出 Number 安全整数，
+  // 字符串/数字混用单独用大数验证 String() 归一。
+  const base = { size: 5, mtime_ns: 1234567890 }
+  check(sameVersion(base, { ...base }), 'size 与 mtime 都相同应视为同版')
+  check(!sameVersion(base, { ...base, size: 6 }), 'size 不同不能算同版')
+  check(!sameVersion(base, { ...base, mtime_ns: base.mtime_ns + 1 }), 'mtime 不同不能算同版')
+  check(
+    sameVersion(
+      { size: 5, mtime_ns: '1700000000000000000' },
+      { size: 5, mtime_ns: 1700000000000000000 },
+    ),
+    'mtime_ns 字符串与数字混用应按同版处理',
+  )
+})
+
+addCase('fileWatch sameVersion 任一侧没有版本', () => {
+  check(sameVersion(null, null), '双 null 视为同版（两边都没有版本）')
+  check(sameVersion(undefined, undefined), '双 undefined 视为同版')
+  check(!sameVersion({ size: 1, mtime_ns: 1 }, null), '一侧有版本、一侧 null 不能算同版')
+  check(!sameVersion(null, { size: 1, mtime_ns: 1 }), 'null 在左侧同样不能算同版')
+})
+
+addCase('fileWatch versionFromStat 文件/缺失/目录/不可用载荷', () => {
+  assertDeepEqual(
+    versionFromStat({ ok: true, kind: 'file', size: 5, mtime_ns: 123 }),
+    { kind: 'file', version: { size: 5, mtime_ns: 123 } },
+    '文件载荷取 size/mtime_ns',
+  )
+  assertDeepEqual(
+    versionFromStat({ ok: true, kind: 'missing', size: null, mtime_ns: null }),
+    { kind: 'missing', version: null },
+    'missing 没有版本',
+  )
+  assertDeepEqual(
+    versionFromStat({ ok: true, kind: 'dir', size: null, mtime_ns: null }),
+    { kind: 'missing', version: null },
+    'dir 也当 missing（原位置已不是文件）',
+  )
+  for (const payload of [null, undefined, {}, { ok: false, kind: 'file' }]) {
+    check(
+      versionFromStat(payload) === null,
+      `载荷不可用应返回 null：${JSON.stringify(payload)}`,
+    )
+  }
+})
+
+addCase('fileWatch versionFromSave 完整版本原样返回、缺字段返回 null', () => {
+  assertDeepEqual(
+    versionFromSave({ ok: true, size: 5, mtime_ns: 123, path: 'a.txt' }),
+    { size: 5, mtime_ns: 123 },
+    '完整版本只取 size/mtime_ns',
+  )
+  assertDeepEqual(
+    versionFromSave({ size: 0, mtime_ns: 123 }),
+    { size: 0, mtime_ns: 123 },
+    'size=0 是合法版本',
+  )
+  for (const data of [
+    null,
+    undefined,
+    {},
+    { size: 5 },
+    { mtime_ns: 5 },
+    { size: 5, mtime_ns: null },
+  ]) {
+    check(versionFromSave(data) === null, `缺版本字段应返回 null：${JSON.stringify(data)}`)
+  }
 })
 
 function jsonResponse(status, payload) {

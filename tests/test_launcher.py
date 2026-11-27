@@ -309,6 +309,26 @@ def case_host_guard(ctx):
     check(status == 200 and body["ok"] is True, f"本机本端口 Host 应 200（{status}）")
 
 
+def case_body_limit(ctx):
+    """刚过 1 MiB 的请求体：回 413 JSON，不是连接重置。
+
+    注：1 MiB 可能整段塞进回环内核缓冲区，这条用例在「去掉 _discard_body」时
+    仍可能拿到 413；真正证明「先读空再回错」的是项目服务 16 MiB 的用例。
+    """
+    skeleton = json.dumps({"path": "too_big", "pad": ""}).encode("utf-8")
+    size = 1024 * 1024 + 1  # 1,048,577：刚过上限
+    payload = {"path": "too_big", "pad": "y" * (size - len(skeleton))}
+    status, content_type, raw = http(ctx.base, "/api/projects", payload=payload)
+    body = json.loads(raw.decode("utf-8"))
+    check(
+        status == 413
+        and content_type.startswith("application/json")
+        and body == {"ok": False, "errors": ["请求体超过 1048576 字节"]},
+        f"launcher 超限请求体应 413 JSON：{status} {body}",
+    )
+
+
+
 # ---- 用例：项目生命周期 -------------------------------------------------
 
 def _open(ctx, path):
@@ -631,6 +651,7 @@ CASES = [
     ("dirs 盘符根 parent 为 null", case_dirs_drive_root),
     ("dirs 不存在/非目录回 400", case_dirs_bad_path),
     ("launcher Host 守卫：只认本机本端口", case_host_guard),
+    ("launcher 超限请求体 413 而不是连接重置", case_body_limit),
     ("项目打开：形状与子进程 health", case_open_project),
     ("项目子进程 /api/project 的 root 一致", case_child_project_info),
     ("同一 path 再开复用 pid/port", case_same_path_reuses_process),

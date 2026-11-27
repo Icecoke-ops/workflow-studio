@@ -552,6 +552,30 @@ def main():
             "响应体不含异常类名或栈信息",
         )
 
+        # 15b) 契约：stat 坏载荷同样回具体字段消息（校验在 EngineService 里）
+        original_stat = service._project.stat_file
+
+        def broken_stat(rel):
+            return {
+                "ok": True,
+                "errors": [],
+                "path": "a.txt",
+                "kind": "file",
+                "size": 1,
+                "mtime_ns": True,
+            }
+
+        service._project.stat_file = broken_stat
+        try:
+            status, _, body = api.json("/api/stat?path=a.txt")
+        finally:
+            service._project.stat_file = original_stat
+        check(
+            status == 500
+            and body["errors"] == ["stat.kind=file 时 mtime_ns 必须是整数"],
+            f"stat 契约违规回具体字段消息：{status} {body}",
+        )
+
         # 16) 调试会话：start → WebSocket state → stop → 端口与临时文件清理
         def debug_roundtrip(verbose):
             def expect(condition, message):
@@ -1438,6 +1462,167 @@ def main():
             and body["size"] == 2
             and (workspace / "nested" / "dir" / "a.txt").read_bytes() == b"hi",
             f"write nested/dir/a.txt：{body}",
+        )
+
+        # 31h) /api/stat 与保存响应：size/mtime_ns 与盘上一致、外部改动可见、缺失/目录/越界/缺参
+        stat_target = workspace / "nested" / "dir" / "a.txt"
+        expected = os.stat(stat_target)
+        status, _, body = api.json("/api/stat?path=nested/dir/a.txt")
+        check(
+            status == 200
+            and body["ok"] is True
+            and body["kind"] == "file"
+            and body["path"] == "nested/dir/a.txt"
+            and body["size"] == expected.st_size == 2
+            and body["mtime_ns"] == expected.st_mtime_ns,
+            f"stat 正常文件与 os.stat 一致：{body}",
+        )
+
+        status, _, saved = api.json(
+            "/api/file", {"path": "nested/dir/a.txt", "text": "hello"}
+        )
+        check(
+            status == 200
+            and saved["ok"] is True
+            and saved["size"] == 5
+            and isinstance(saved.get("mtime_ns"), int)
+            and saved["mtime_ns"] > 0,
+            f"保存响应带 mtime_ns：{saved}",
+        )
+        status, _, body = api.json("/api/stat?path=nested/dir/a.txt")
+        check(
+            status == 200
+            and body["kind"] == "file"
+            and body["size"] == saved["size"] == 5
+            and body["mtime_ns"] == saved["mtime_ns"],
+            f"保存响应的 mtime_ns 与随后 stat 一致：{body}",
+        )
+
+        before = body["mtime_ns"]
+        bumped = before + 1_000_000_000
+        stat_target.write_text("external", encoding="utf-8")
+        os.utime(stat_target, ns=(expected.st_atime_ns, bumped))
+        status, _, body = api.json("/api/stat?path=nested/dir/a.txt")
+        check(
+            status == 200
+            and body["kind"] == "file"
+            and body["size"] == 8
+            and body["mtime_ns"] == bumped
+            and body["mtime_ns"] != before,
+            f"外部改文件后 mtime_ns 变化：{before} -> {body['mtime_ns']}",
+        )
+
+        status, _, body = api.json("/api/stat?path=nested/dir")
+        check(
+            status == 200
+            and body["ok"] is True
+            and body["kind"] == "dir"
+            and body["size"] is None
+            and body["mtime_ns"] is None,
+            f"stat 目录 kind=dir 且无版本：{body}",
+        )
+
+        api.json("/api/file", {"path": "stat_gone.txt", "text": "x"})
+        api.json("/api/delete", {"path": "stat_gone.txt"})
+        status, _, body = api.json("/api/stat?path=stat_gone.txt")
+        check(
+            status == 200
+            and body["ok"] is True
+            and body["kind"] == "missing"
+            and body["size"] is None
+            and body["mtime_ns"] is None,
+            f"stat 缺失文件 kind=missing：{body}",
+        )
+
+        for bad_rel in ("../x", "/abs.txt", "C:/abs.txt"):
+            quoted = urllib.parse.quote(bad_rel, safe="")
+            status, _, stat_body = api.json("/api/stat?path=" + quoted)
+            status_file, _, file_body = api.json("/api/file?path=" + quoted)
+            check(
+                status == status_file == 200
+                and stat_body["ok"] is False
+                and stat_body["errors"] == file_body["errors"],
+                f"stat 与 file 同口径拒绝越界 {bad_rel!r}：{stat_body['errors']}",
+            )
+
+        # 链接逃逸：与 /api/file 同一口径（resolve 后不在根内）
+        stat_link = workspace / "stat_escape_link"
+        outside = temp / "stat_outside"
+        outside.mkdir(exist_ok=True)
+        if os.name == "nt":
+            made = subprocess.run(
+                ["cmd", "/c", "mklink", "/J", str(stat_link), str(outside)],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            check(made.returncode == 0, "应为 stat 越界用例创建 junction")
+        else:
+            os.symlink(outside, stat_link, target_is_directory=True)
+        try:
+            status, _, stat_body = api.json("/api/stat?path=stat_escape_link")
+            status_file, _, file_body = api.json("/api/file?path=stat_escape_link")
+            check(
+                status == status_file == 200
+                and stat_body["ok"] is False
+                and stat_body["errors"] == file_body["errors"],
+                f"stat 与 file 同口径拒绝链接逃逸：{stat_body['errors']}",
+            )
+        finally:
+            if os.name == "nt":
+                os.rmdir(stat_link)
+            else:
+                stat_link.unlink()
+
+        status, _, body = api.json("/api/stat")
+        check(
+            status == 400 and body["errors"] == ["缺少 path 查询参数"],
+            f"stat 缺 path 返回 400：{status} {body}",
+        )
+
+        # 31i) 超限请求体：先读空再回 413 JSON，客户端不会被连接重置
+        # 注意：>32 MiB 的实现边界是「读 32 MiB 就关」，那种情况允许重置，这里不测。
+        limit = server_module.StudioHandler.max_body
+        over = limit + 33  # 16,777,249：刚过上限，客户端会一次 sendall 写完
+        text_skeleton = '{"path": "too_big.txt", "text": ""}'
+        huge_text = "x" * (over - len(text_skeleton))
+        huge_raw = f'{{"path": "too_big.txt", "text": "{huge_text}"}}'
+        check(
+            len(huge_raw.encode("utf-8")) == over,
+            f"构造的请求体应为 {over} 字节：{len(huge_raw.encode('utf-8'))}",
+        )
+        status, content_type, text = api.call("/api/file", raw=huge_raw)
+        check(
+            status == 413
+            and content_type.startswith("application/json")
+            and json.loads(text) == {"ok": False, "errors": [f"请求体超过 {limit} 字节"]},
+            f"超限请求体应 413 JSON：{status} {text[:120]}",
+        )
+        check(not (workspace / "too_big.txt").exists(), "超限请求体不能落文件")
+
+        port = server.server_address[1]
+        status, raw_body = http_raw(
+            port,
+            "POST",
+            "/api/file",
+            {"Host": "evil.example"},
+            {"path": "too_big.txt", "text": huge_text},
+        )
+        bad_host = json.loads(raw_body.decode("utf-8"))
+        check(
+            status == 403
+            and bad_host["ok"] is False
+            and any("Host 不被允许" in item for item in bad_host["errors"]),
+            f"坏 Host 带大 body 仍回 403 JSON：{status} {bad_host}",
+        )
+
+        status, content_type, text = api.call("/api/nope", raw=huge_raw)
+        not_found = json.loads(text)
+        check(
+            status == 404
+            and content_type.startswith("application/json")
+            and not_found["errors"] == ["未知路径：/api/nope"],
+            f"未知路由带大 body 仍回 404 JSON：{status} {not_found}",
         )
 
         # 32) 项目 plugins 里的非插件 zip：skipped 一条、source=project、ok:true

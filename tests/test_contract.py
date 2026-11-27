@@ -22,6 +22,7 @@ from studio.contract import (
     check_plugins,
     check_project,
     check_run,
+    check_stat,
     check_tree,
     check_validate,
     check_write_file,
@@ -248,6 +249,10 @@ def case_real_service_payloads():
         check(failed["ok"] is False, "坏列名应在执行期失败")
         check(check_run(failed) == failed, "run 失败响应未通过契约")
 
+        stat = service.stat_file("data.csv")
+        check(stat["kind"] == "file", f"stat 响应 kind=file：{stat}")
+        check(check_stat(stat) == stat, "stat 响应未通过契约")
+
 
 # ---- 项目与文件接口：check_project / check_tree / check_file / check_write_file / check_path_result ----
 
@@ -345,7 +350,13 @@ def case_file_accepts_and_rejects():
 
 
 def case_write_file_accepts_and_rejects():
-    good = {"ok": True, "errors": [], "path": "a.txt", "size": 3}
+    good = {
+        "ok": True,
+        "errors": [],
+        "path": "a.txt",
+        "size": 3,
+        "mtime_ns": 1795689807077378000,
+    }
     check(check_write_file(good) == good, "write_file 合法载荷应通过")
 
     payload = copy.deepcopy(good)
@@ -355,12 +366,93 @@ def case_write_file_accepts_and_rejects():
     )
 
     payload = copy.deepcopy(good)
+    payload["mtime_ns"] = True
+    expect_raises(
+        ContractError, lambda: check_write_file(payload), "mtime_ns 必须是整数"
+    )
+
+    payload = copy.deepcopy(good)
+    del payload["mtime_ns"]
+    expect_raises(
+        ContractError, lambda: check_write_file(payload), "mtime_ns 必须是整数"
+    )
+
+    payload = copy.deepcopy(good)
+    payload["mtime_ns"] = "1795689807077378000"
+    expect_raises(
+        ContractError, lambda: check_write_file(payload), "mtime_ns 必须是整数"
+    )
+
+    payload = copy.deepcopy(good)
     payload["path"] = ""
     expect_raises(ContractError, lambda: check_write_file(payload), "path 不能为空")
 
     payload = copy.deepcopy(good)
     payload["path"] = "../x"
     expect_raises(ContractError, lambda: check_write_file(payload), "不能包含 ..")
+
+
+def case_stat_accepts_and_rejects():
+    file_payload = {
+        "ok": True,
+        "errors": [],
+        "path": "a.txt",
+        "kind": "file",
+        "size": 3,
+        "mtime_ns": 1795689807077378000,
+    }
+    missing = {
+        "ok": True,
+        "errors": [],
+        "path": "gone.txt",
+        "kind": "missing",
+        "size": None,
+        "mtime_ns": None,
+    }
+    directory = {
+        "ok": True,
+        "errors": [],
+        "path": "sub",
+        "kind": "dir",
+        "size": None,
+        "mtime_ns": None,
+    }
+    check(check_stat(file_payload) == file_payload, "stat file 载荷应通过")
+    check(check_stat(missing) == missing, "stat missing 载荷应通过")
+    check(check_stat(directory) == directory, "stat dir 载荷应通过")
+
+    payload = copy.deepcopy(file_payload)
+    payload["kind"] = "weird"
+    expect_raises(
+        ContractError, lambda: check_stat(payload), "kind 只能是 file / missing / dir"
+    )
+
+    payload = copy.deepcopy(file_payload)
+    payload["size"] = True
+    expect_raises(ContractError, lambda: check_stat(payload), "size 必须是非负整数")
+
+    payload = copy.deepcopy(file_payload)
+    payload["mtime_ns"] = True
+    expect_raises(ContractError, lambda: check_stat(payload), "mtime_ns 必须是整数")
+
+    payload = copy.deepcopy(file_payload)
+    del payload["mtime_ns"]
+    expect_raises(ContractError, lambda: check_stat(payload), "mtime_ns 必须是整数")
+
+    payload = copy.deepcopy(missing)
+    payload["size"] = 0
+    expect_raises(
+        ContractError, lambda: check_stat(payload), "不是 file 时 size 必须是 null"
+    )
+
+    payload = copy.deepcopy(directory)
+    payload["mtime_ns"] = 1
+    expect_raises(
+        ContractError, lambda: check_stat(payload), "不是 file 时 mtime_ns 必须是 null"
+    )
+
+    failed = {"ok": False, "errors": ["不是文件：nope"], "path": "nope"}
+    check(check_stat(failed) == failed, "stat 失败载荷应通过")
 
 
 def case_path_result_accepts_and_rejects():
@@ -392,6 +484,7 @@ CASES = [
     ("check_tree 接受合法/拒绝畸形", case_tree_accepts_and_rejects),
     ("check_file 接受合法/拒绝畸形", case_file_accepts_and_rejects),
     ("check_write_file 接受合法/拒绝畸形", case_write_file_accepts_and_rejects),
+    ("check_stat 接受合法/拒绝畸形", case_stat_accepts_and_rejects),
     ("check_path_result 接受合法/拒绝畸形", case_path_result_accepts_and_rejects),
     ("真实服务四个响应通过对应校验器", case_real_service_payloads),
 ]
