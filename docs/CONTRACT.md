@@ -256,6 +256,8 @@ self.path = expand_env(config["path"])   # "${workspace}/data/x.csv"
 
 ## 6. Studio HTTP API
 
+> 面向智能体的使用文档（skill 包）见 [docs/skill/SKILL.md](skill/SKILL.md)。
+
 Studio 是两层进程：
 
 | 进程 | 启动方式 | 端口 | 职责 |
@@ -294,7 +296,8 @@ Studio 是两层进程：
 | GET | `/api/project` | `{"ok":true,"root","name","launcher","plugins":{"global":n,"project":n},"skipped":[{"file","path","reason","source"}],"errors":[]}` |
 | GET | `/api/tree` | `?path=<项目内相对路径>`（空串=项目根）→ `{"ok":true,"path","entries":[{name,path,kind:"dir"\|"file",size?}],"errors":[]}`，只列一层，目录在前 |
 | GET | `/api/file` | `?path=` → `{"ok":true,"path","kind":"text"\|"binary"\|"too_large","size","text","errors":[]}` |
-| POST | `/api/file` | `{"path","text"}` → `{"ok":true,"path","size","errors":[]}`，原子写；`text` 必须是合法 UTF-8（孤立代理项回 `ok:false`） |
+| GET | `/api/stat` | `?path=` → `{"ok":true,"path","kind":"file"\|"missing"\|"dir","size","mtime_ns","errors":[]}`；`mtime_ns` 是 `st_mtime_ns`（整数纳秒），目录与缺失文件的两值为 `null`；文件不存在回 `kind:"missing"`（200，不是错误），供前端轮询判断磁盘变更 |
+| POST | `/api/file` | `{"path","text"}` → `{"ok":true,"path","size","mtime_ns","errors":[]}`，原子写；`text` 必须是合法 UTF-8（孤立代理项回 `ok:false`）。落盘后 `os.stat` 取 `mtime_ns`；已写入但取不到 stat 时回 `ok:false`（此时文件可能已写入） |
 | POST | `/api/mkdir` | `{"path"}` → `{"ok":true,"path","errors":[]}` |
 | POST | `/api/rename` | `{"path","new_name"}` → `{"ok":true,"path","errors":[]}`；`new_name` 必须能原样落盘：不含分隔符、`<>:"\|?*`、控制字符，不以点或空格结尾，不是 CON/PRN/AUX/NUL/COM1-9/LPT1-9 保留名。`/api/file` POST 与 `/api/mkdir` 的路径每一段也按这套名字规则校验 |
 | POST | `/api/delete` | `{"path"}` → `{"ok":true,"path","errors":[]}`；目录必须为空，项目根不可删 |
@@ -312,7 +315,7 @@ Studio 是两层进程：
 
 路径规则：所有 `path` 都是**项目内相对路径**，拒绝 `..`、绝对路径、盘符、UNC，也拒绝经链接（junction / 符号链接）指到项目外。文本文件上限 1 MiB，含 NUL 判为 `binary`。
 
-错误口径：请求体不是 JSON 对象（解析失败、顶层不是对象、缺 `workflow`）回 400，未知路径回 404，请求体超过 16 MiB 回 413，响应体均为 `{"ok":false,"errors":[具体消息]}`。业务失败（校验不通过、执行期异常、文件操作失败）回 200 + `ok:false`，原因进 `errors`——`/api/run` 的执行期异常**不回 500**。服务端自身**载荷违反契约**（`ContractError`，我方 bug）回 500 + 字段级消息，原样给调用方；其余**意外异常**回 500 + `{"ok":false,"errors":["服务器内部错误"]}`，完整栈只写服务端日志，不把内部路径或异常原文暴露给前端。客户端中途断开直接静默，不写响应。
+错误口径：请求体不是 JSON 对象（解析失败、顶层不是对象、缺 `workflow`）回 400，未知路径回 404，请求体超过 16 MiB 回 413，响应体均为 `{"ok":false,"errors":[具体消息]}`。业务失败（校验不通过、执行期异常、文件操作失败）回 200 + `ok:false`，原因进 `errors`——`/api/run` 的执行期异常**不回 500**。`/api/stat` 缺 `path` 参数回 400，路径非法或越界回 200 + `ok:false`（与其他业务失败一致，此时不含 `path`/`kind`/`size`/`mtime_ns`）。服务端自身**载荷违反契约**（`ContractError`，我方 bug）回 500 + 字段级消息，原样给调用方；其余**意外异常**回 500 + `{"ok":false,"errors":["服务器内部错误"]}`，完整栈只写服务端日志，不把内部路径或异常原文暴露给前端。客户端中途断开直接静默，不写响应。
 
 ### 6.3 调试会话
 

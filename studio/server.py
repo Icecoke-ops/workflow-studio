@@ -14,6 +14,7 @@
     GET  /api/project     项目根、启动参数与插件加载概况
     GET  /api/tree        列项目内一层目录（?path=）
     GET  /api/file        读项目内文本文件（?path=）
+    GET  /api/stat        查项目内文件版本（?path=）
     POST /api/validate    校验工作流
     POST /api/run         校验并执行工作流
     POST /api/file        写入文本文件 {path, text}
@@ -64,6 +65,7 @@ from .contract import (
     check_plugins,
     check_project,
     check_run,
+    check_stat,
     check_tree,
     check_validate,
     check_write_file,
@@ -214,6 +216,9 @@ class EngineService(ApiService):
     def read_file(self, path):
         return check_file(self._project.read_text(path))
 
+    def stat_file(self, path):
+        return check_stat(self._project.stat_file(path))
+
     def write_file(self, path, text):
         return check_write_file(self._project.write_text(path, text))
 
@@ -350,6 +355,12 @@ class StudioHandler(StudioHTTPHandler):
                 self._bad_request("缺少 path 查询参数")
                 return
             self._send_json(HTTPStatus.OK, service.read_file(rel))
+        elif path == "/api/stat":
+            rel = query_path(url, None)
+            if rel is None:
+                self._bad_request("缺少 path 查询参数")
+                return
+            self._send_json(HTTPStatus.OK, service.stat_file(rel))
         elif path == "/":
             self._serve_index()
         elif path.startswith("/static/"):

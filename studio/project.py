@@ -1,6 +1,7 @@
 """项目根内的文件读写：所有路径都锁在项目根内，越界即业务失败。"""
 
 import os
+import stat
 import tempfile
 from pathlib import Path
 
@@ -95,6 +96,24 @@ class Project:
             return _file_result(parts, size, "binary")
         return _file_result(parts, size, "text", text)
 
+    def stat_file(self, rel):
+        """只查不读：文件回 size/mtime_ns，目录与不存在用 kind 区分。"""
+        parts = _rel_parts(rel)
+        if not parts:
+            raise ProjectError("路径不能为空")
+        path = self.resolve(rel)
+        try:
+            info = path.stat()
+        except FileNotFoundError:
+            return _stat_result(parts, "missing")
+        except OSError as exc:
+            raise ProjectError(
+                f"读取文件信息失败 {_display(parts)}：{_reason(exc)}"
+            ) from None
+        if stat.S_ISDIR(info.st_mode):
+            return _stat_result(parts, "dir")
+        return _stat_result(parts, "file", info.st_size, info.st_mtime_ns)
+
     # -- 写 --------------------------------------------------------------
     def write_text(self, rel, text):
         """新建或覆盖文本文件：同目录临时文件 + os.replace，UTF-8 无 BOM。"""
@@ -131,7 +150,19 @@ class Project:
                 Path(temporary).unlink(missing_ok=True)
             except OSError:
                 pass
-        return {"ok": True, "path": "/".join(parts), "size": len(data), "errors": []}
+        try:
+            mtime_ns = os.stat(path).st_mtime_ns
+        except OSError as exc:
+            raise ProjectError(
+                f"已写入但读不到文件信息 {_display(parts)}：{_reason(exc)}"
+            ) from None
+        return {
+            "ok": True,
+            "path": "/".join(parts),
+            "size": len(data),
+            "mtime_ns": mtime_ns,
+            "errors": [],
+        }
 
     def mkdir(self, rel):
         parts = _rel_parts(rel)
@@ -280,5 +311,16 @@ def _file_result(parts, size, kind, text=None):
         "kind": kind,
         "size": size,
         "text": text,
+        "errors": [],
+    }
+
+
+def _stat_result(parts, kind, size=None, mtime_ns=None):
+    return {
+        "ok": True,
+        "path": "/".join(parts),
+        "kind": kind,
+        "size": size,
+        "mtime_ns": mtime_ns,
         "errors": [],
     }

@@ -53,6 +53,10 @@ class ApiService(ABC):
         """读文本；二进制或超过上限时只回类型与大小。"""
 
     @abstractmethod
+    def stat_file(self, path) -> dict:
+        """查文件版本：文件回 size/mtime_ns，目录与不存在用 kind 区分。"""
+
+    @abstractmethod
     def write_file(self, path, text) -> dict:
         """新建或覆盖文本文件。"""
 
@@ -339,6 +343,28 @@ def check_file(payload):
     return payload
 
 
+def check_stat(payload):
+    _expect_dict(payload, "stat")
+    if _expect_ok(payload, "stat"):
+        _expect_rel_path(payload, "path", allow_empty=False)
+        kind = payload.get("kind")
+        if kind not in ("file", "missing", "dir"):
+            _fail("stat.kind 只能是 file / missing / dir")
+        size = payload.get("size")
+        mtime_ns = payload.get("mtime_ns")
+        if kind == "file":
+            if not isinstance(size, int) or isinstance(size, bool) or size < 0:
+                _fail("stat.kind=file 时 size 必须是非负整数")
+            if not isinstance(mtime_ns, int) or isinstance(mtime_ns, bool):
+                _fail("stat.kind=file 时 mtime_ns 必须是整数")
+        else:
+            if size is not None:
+                _fail("stat.kind 不是 file 时 size 必须是 null")
+            if mtime_ns is not None:
+                _fail("stat.kind 不是 file 时 mtime_ns 必须是 null")
+    return payload
+
+
 def check_write_file(payload):
     _expect_dict(payload, "write_file")
     if _expect_ok(payload, "write_file"):
@@ -346,6 +372,9 @@ def check_write_file(payload):
         size = payload.get("size")
         if not isinstance(size, int) or isinstance(size, bool) or size < 0:
             _fail("write_file.size 必须是非负整数")
+        mtime_ns = payload.get("mtime_ns")
+        if not isinstance(mtime_ns, int) or isinstance(mtime_ns, bool):
+            _fail("write_file.mtime_ns 必须是整数")
     return payload
 
 
